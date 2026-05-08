@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v10.5 - Quality Mode"
+    return "🚀 Crime Bot v10.6 - Order Book + Lower Volume"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -34,7 +34,7 @@ def send_telegram(text):
 
 def analyze_order_book(exchange, symbol):
     try:
-        ob = exchange.fetch_order_book(symbol, limit=15)
+        ob = exchange.fetch_order_book(symbol, limit=20)
         bid_vol = sum(lvl[1] for lvl in ob.get("bids", []))
         ask_vol = sum(lvl[1] for lvl in ob.get("asks", []))
         if ask_vol == 0:
@@ -46,7 +46,7 @@ def analyze_order_book(exchange, symbol):
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v10.5 Started</b>\nScore = 60 | Binance removed + Order Book filter")
+    send_telegram("🚀 <b>Crime Bot v10.6 Started</b>\nOrder Book Added + Volume lowered to 4M")
 
     while True:
         print(f"\n🔍 SCAN STARTED at {datetime.datetime.utcnow()}")
@@ -68,7 +68,7 @@ def bot_loop():
                         continue
 
                     volume = t.get('quoteVolume') or 0
-                    if volume < 6_000_000: 
+                    if volume < 4_000_000:          # LOWERED as you asked
                         continue
 
                     # Funding
@@ -92,14 +92,14 @@ def bot_loop():
                     except:
                         pass
 
-                    # New Filter: Order Book Buy Pressure
+                    # Order Book
                     buy_pressure = analyze_order_book(ex, symbol)
 
                     # Score
                     score = 0
                     if abs(funding) > 0.0003: score += 32
                     if vol_spike: score += 28
-                    if buy_pressure: score += 20
+                    if buy_pressure: score += 20      # New filter
                     if volume < 50_000_000: score += 12
 
                     if score >= ALERT_MIN_SCORE:
@@ -107,10 +107,10 @@ def bot_loop():
                         send_telegram(f"""🚨 <b>CRIME ALERT</b> (Score: {score}/100)
 🔥 {symbol} on {name}
 
-💰 Volume: ${volume/1_000_000:.1f}M
-📈 Funding: {funding*100:+.4f}%
-⚡ Volume Spike: {vol_ratio:.1f}x
-📊 Buy Pressure: {'STRONG' if buy_pressure else 'Normal'}""")
+Volume: ${volume/1_000_000:.1f}M
+Funding: {funding*100:+.4f}%
+Volume Spike: {vol_ratio:.1f}x
+Buy Pressure: {'✅ STRONG' if buy_pressure else 'Normal'}""")
 
             except Exception as e:
                 print(f"  Error on {name}: {e}")
