@@ -6,352 +6,317 @@ import threading
 import requests
 from flask import Flask
 
-
 # =========================================================
 # CONFIG
 # =========================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 40
 
-MAX_PAIRS_PER_EXCHANGE = 250
+ALERT_MIN_SCORE = 60
 
-MIN_VOLUME = 2_000_000
-LOW_VOLUME_BONUS_LIMIT = 30_000_000
+MIN_VOLUME = 5_000_000
+MAX_VOLUME = 500_000_000  # widened to avoid over-filtering
 
+MAX_PAIRS = 250
+
+COOLDOWN_SECONDS = 1800
+
+MAJOR_COINS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA"}
 
 # =========================================================
-# FLASK KEEPALIVE
+# APP
 # =========================================================
 
 app = Flask(__name__)
 
-
 @app.route("/")
 def home():
-    return "🚀 Alpha Hunter Bot ONLINE"
-
+    return "🚀 Scanner LIVE"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-
 # =========================================================
 # TELEGRAM
 # =========================================================
 
-def send_telegram(text):
+def send_telegram(msg):
     if not TG_ENABLED:
-        print("Telegram disabled")
+        print("TG disabled:", msg)
         return
-
     try:
-        response = requests.post(
+        requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-            },
-            timeout=10,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3900]},
+            timeout=10
         )
-
-        print(f"Telegram response: {response.status_code} | {response.text}")
-
-    except Exception as error:
-        print(f"Telegram error: {error}")
-
+    except Exception as e:
+        print("TG error:", e)
 
 # =========================================================
-# HELPERS
+# SAFE HELPERS (CRITICAL FIX)
 # =========================================================
 
-def get_volume_spike(exchange, symbol):
+def f(x):
     try:
-        candles = exchange.fetch_ohlcv(symbol, "5m", limit=8)
+        if x is None:
+            return 0.0
+        return float(x)
+    except:
+        return 0.0
 
-        if len(candles) < 6:
-            return False, 0
+# =========================================================
+# EXCHANGE INIT (FIXED)
+# =========================================================
 
-        volumes = [candle[5] for candle in candles]
-        avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
+def make_exchanges():
 
-        if avg_volume == 0:
-            return False, 0
+    return {
+        "Binance": ccxt.binance({
+            "enableRateLimit": True,
+            "options": {"defaultType": "future"}
+        }),
 
-        ratio = volumes[-1] / avg_volume
-        return ratio >= 2.0, ratio
+        "MEXC": ccxt.mexc({
+            "enableRateLimit": True,
+            "timeout": 30000,
+            "options": {"defaultType": "swap"}
+        }),
 
-    except Exception as error:
-        print(f"Volume spike error {symbol}: {error}")
-        return False, 0
+        "BloFin": ccxt.blofin({
+            "enableRateLimit": True,
+            "timeout": 30000
+        })
+    }
 
+# =========================================================
+# CORE SIGNALS
+# =========================================================
 
-def get_liq_heat(exchange, symbol):
+def volume_spike(ex, symbol):
     try:
-        candles = exchange.fetch_ohlcv(symbol, "5m", limit=12)
-        total = 0
-
-        for candle in candles:
-            high = candle[2]
-            low = candle[3]
-            close = candle[4]
-            volume = candle[5]
-
-            if close == 0:
-                continue
-
-            range_pct = ((high - low) / close) * 100
-            total += range_pct * volume
-
-        return total
-
-    except Exception as error:
-        print(f"Liq heat error {symbol}: {error}")
+        c = ex.fetch_ohlcv(symbol, "5m", limit=10)
+        vols = [f(x[5]) for x in c]
+        if len(vols) < 5:
+            return 0
+        avg = sum(vols[:-1]) / max(len(vols[:-1]), 1)
+        return vols[-1] / avg if avg > 0 else 0
+    except:
         return 0
 
-
-def analyze_order_book(exchange, symbol):
+def price_accel(ex, symbol):
     try:
-        order_book = exchange.fetch_order_book(symbol, limit=20)
+        c = ex.fetch_ohlcv(symbol, "5m", limit=6)
+        if len(c) < 6:
+            return 0
+        return ((f(c[-1][4]) - f(c[0][4])) / max(f(c[0][4]), 1)) * 100
+    except:
+        return 0
 
-        bids = order_book.get("bids", [])
-        asks = order_book.get("asks", [])
-
-        bid_vol = sum(bid[1] for bid in bids)
-        ask_vol = sum(ask[1] for ask in asks)
-
-        if ask_vol == 0:
-            return False, 0
-
-        ratio = bid_vol / ask_vol
-        return ratio > 1.4, ratio
-
-    except Exception as error:
-        print(f"Orderbook error {symbol}: {error}")
-        return False, 0
-
-
-def get_open_interest_change(exchange, symbol, prev_oi):
+def orderbook_ratio(ex, symbol):
     try:
-        oi_data = exchange.fetch_open_interest(symbol)
+        ob = ex.fetch_order_book(symbol, limit=20)
+        bids = sum(f(x[1]) for x in ob.get("bids", []))
+        asks = sum(f(x[1]) for x in ob.get("asks", []))
+        return bids / asks if asks > 0 else 0
+    except:
+        return 0
 
-        oi_value = (
-            oi_data.get("openInterestAmount")
-            or oi_data.get("openInterest")
-            or oi_data.get("openInterestValue")
+def oi_change(ex, symbol, state):
+    try:
+        oi = ex.fetch_open_interest(symbol)
+        val = f(
+            oi.get("openInterest")
+            or oi.get("openInterestAmount")
+            or oi.get("openInterestValue")
         )
 
-        if oi_value is None:
+        key = f"{ex.id}:{symbol}"
+        prev = state.get(key, 0)
+
+        state[key] = val
+
+        if prev == 0:
             return 0
 
-        oi_value = float(oi_value)
-        key = f"{exchange.id}:{symbol}"
-        oi_change = 0
-
-        if key in prev_oi and prev_oi[key] > 0:
-            oi_change = ((oi_value - prev_oi[key]) / prev_oi[key]) * 100
-
-        prev_oi[key] = oi_value
-        return oi_change
-
-    except Exception as error:
-        print(f"OI error {symbol}: {error}")
+        return ((val - prev) / prev) * 100
+    except:
         return 0
 
+# =========================================================
+# MTF (FIXED SAFE)
+# =========================================================
 
-def get_funding(exchange, symbol):
+def tf_score(ex, symbol, tf):
     try:
-        funding_rate = exchange.fetch_funding_rate(symbol)
-        return float(funding_rate.get("fundingRate", 0))
+        c = ex.fetch_ohlcv(symbol, tf, limit=20)
+        if len(c) < 10:
+            return 0
 
-    except Exception as error:
-        print(f"Funding error {symbol}: {error}")
+        closes = [f(x[4]) for x in c]
+        highs = [f(x[2]) for x in c]
+
+        if len(closes) < 5:
+            return 0
+
+        break_high = closes[-1] > max(highs[-10:-1])
+        trend = closes[-1] > closes[-3] > closes[-5]
+
+        score = 0
+        if break_high:
+            score += 1
+        if trend:
+            score += 1
+        return score
+    except:
         return 0
 
+def mtf_alignment(ex, symbol):
+    tf = {
+        "5m": tf_score(ex, symbol, "5m"),
+        "15m": tf_score(ex, symbol, "15m"),
+        "1h": tf_score(ex, symbol, "1h"),
+        "4h": tf_score(ex, symbol, "4h"),
+    }
 
-# =========================================================
-# SCORING ENGINE
-# =========================================================
-
-def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
-    score = 0
-    reasons = []
-
-    if abs(funding) > 0.00015:
-        score += 20
-        reasons.append("Funding Extreme")
-
-    if vol_ratio > 2:
-        score += 25
-        reasons.append(f"Volume Spike {vol_ratio:.1f}x")
-
-    if oi_change > 5:
-        score += 20
-        reasons.append(f"OI +{oi_change:.1f}%")
-
-    if ob_ratio > 1.4:
-        score += 15
-        reasons.append(f"Buy Pressure {ob_ratio:.2f}")
-
-    if liq_heat > 500:
-        score += 10
-        reasons.append("Liquidation Pressure")
-
-    if volume < LOW_VOLUME_BONUS_LIMIT:
-        score += 10
-        reasons.append("Midcap Momentum")
-
-    return score, reasons
-
+    score = tf["5m"]*5 + tf["15m"]*10 + tf["1h"]*20 + tf["4h"]*30
+    return score, tf
 
 # =========================================================
 # MAIN LOOP
 # =========================================================
 
-def bot_loop():
-    send_telegram(
-        "🚀 <b>Alpha Hunter Bot Started</b>\n"
-        f"Minimum score: {ALERT_MIN_SCORE}"
-    )
+def bot():
 
-    prev_oi = {}
+    prev_oi_state = {}
+
+    send_telegram("🚀 Scanner FIXED version started")
 
     while True:
-        print(
-            f"\n==============================\n"
-            f"SCAN STARTED {datetime.datetime.utcnow()}\n"
-            f"=============================="
-        )
 
-        alerts_fired = 0
+        print("\n================ SCAN START ================")
 
-        exchanges = {
-            "Binance": ccxt.binance(
-                {
-                    "enableRateLimit": True,
-                    "options": {"defaultType": "future"},
-                }
-            ),
-            "MEXC": ccxt.mexc(
-                {
-                    "enableRateLimit": True,
-                    "options": {"defaultType": "swap"},
-                }
-            ),
-            "BloFin": ccxt.blofin({"enableRateLimit": True}),
-        }
+        exchanges = make_exchanges()
 
-        for name, exchange in exchanges.items():
-            print(f"\n🔍 Scanning {name}")
+        for name, ex in exchanges.items():
 
             try:
-                markets = exchange.load_markets()
-                tickers = exchange.fetch_tickers()
 
-                sorted_tickers = sorted(
-                    tickers.items(),
-                    key=lambda item: item[1].get("quoteVolume", 0),
-                    reverse=True,
-                )
+                tickers = ex.fetch_tickers()
+                print(f"{name} tickers: {len(tickers)}")
+
+                if not tickers:
+                    continue
+
+                valid = []
+
+                for sym, t in tickers.items():
+
+                    vol = f(t.get("quoteVolume"))
+
+                    if vol == 0:
+                        continue
+
+                    valid.append((sym, t, vol))
+
+                # FIXED SAFE SORT (NO NoneType CRASH)
+                valid.sort(key=lambda x: x[2], reverse=True)
+
+                print(f"{name} valid pairs: {len(valid)}")
 
                 scanned = 0
 
-                for symbol, ticker in sorted_tickers:
-                    try:
-                        if scanned >= MAX_PAIRS_PER_EXCHANGE:
-                            break
+                for sym, t, vol in valid:
 
-                        if "USDT" not in symbol:
-                            continue
+                    if scanned > MAX_PAIRS:
+                        break
 
-                        if symbol not in markets:
-                            continue
+                    if "USDT" not in sym:
+                        continue
 
-                        market = markets[symbol]
+                    base = sym.split("/")[0]
+                    if base in MAJOR_COINS:
+                        continue
 
-                        if not (market.get("swap") or market.get("future")):
-                            continue
+                    if vol < MIN_VOLUME:
+                        continue
 
-                        scanned += 1
+                    scanned += 1
 
-                        volume = ticker.get("quoteVolume", 0)
-                        if volume is None:
-                            continue
+                    # =========================
+                    # SIGNALS
+                    # =========================
 
-                        volume = float(volume)
-                        if volume < MIN_VOLUME:
-                            continue
+                    vs = volume_spike(ex, sym)
+                    pa = price_accel(ex, sym)
+                    ob = orderbook_ratio(ex, sym)
+                    oi = oi_change(ex, sym, prev_oi_state)
+                    mtf, tfs = mtf_alignment(ex, sym)
 
-                        last_price = ticker.get("last", 0)
+                    # =========================
+                    # DEBUG (IMPORTANT FIX)
+                    # =========================
 
-                        funding = get_funding(exchange, symbol)
-                        _vol_spike, vol_ratio = get_volume_spike(exchange, symbol)
-                        oi_change = get_open_interest_change(exchange, symbol, prev_oi)
-                        _ob_pressure, ob_ratio = analyze_order_book(exchange, symbol)
-                        liq_heat = get_liq_heat(exchange, symbol)
+                    print(f"{sym} | vol={vs:.2f}x accel={pa:.1f}% oi={oi:.1f}% mtf={mtf}")
 
-                        print(
-                            f"{name} | {symbol} | "
-                            f"Vol=${volume / 1e6:.1f}M | "
-                            f"Funding={funding:.5f} | "
-                            f"VolRatio={vol_ratio:.2f} | "
-                            f"OI={oi_change:.2f}% | "
-                            f"OB={ob_ratio:.2f} | "
-                            f"Liq={liq_heat:.1f}"
-                        )
+                    # =========================
+                    # CONFLUENCE
+                    # =========================
 
-                        score, reasons = calculate_score(
-                            funding,
-                            vol_ratio,
-                            oi_change,
-                            ob_ratio,
-                            liq_heat,
-                            volume,
-                        )
+                    con = 0
+                    if vs > 3: con += 1
+                    if pa > 4: con += 1
+                    if ob > 1.5: con += 1
+                    if oi > 8: con += 1
+                    if mtf > 20: con += 1
 
-                        if score >= ALERT_MIN_SCORE:
-                            alerts_fired += 1
-                            reason_text = "\n".join([f"• {reason}" for reason in reasons])
+                    if con < 3:
+                        continue
 
-                            msg = f"""
-🚨 <b>ALPHA SIGNAL</b>
+                    # =========================
+                    # SCORE (SIMPLE BUT CLEAN)
+                    # =========================
 
-🔥 <b>{symbol}</b>
-🏦 Exchange: {name}
+                    score = (
+                        vs*10 +
+                        pa*2 +
+                        ob*10 +
+                        oi*1.5 +
+                        mtf
+                    )
 
-💰 Price: ${last_price:.6g}
-📊 24h Volume: ${volume / 1e6:.2f}M
+                    if score < ALERT_MIN_SCORE:
+                        continue
 
-📈 Funding: {funding * 100:+.4f}%
-📦 OI Change: {oi_change:+.2f}%
-📚 Orderbook Ratio: {ob_ratio:.2f}
-⚡ Volume Spike: {vol_ratio:.2f}x
+                    msg = f"""
+🚨 SIGNAL {name}
 
-🎯 Score: <b>{score}/100</b>
+{sym}
+Score: {score:.1f}
 
-{reason_text}
+VolSpike: {vs:.2f}x
+Accel: {pa:.1f}%
+OI: {oi:.1f}%
+OB: {ob:.2f}
+
+MTF: {tfs}
 """
 
-                            print(msg)
-                            send_telegram(msg)
-                            time.sleep(1)
+                    print(msg)
+                    send_telegram(msg)
 
-                    except Exception as error:
-                        print(f"Pair error {symbol}: {error}")
+                    time.sleep(0.5)
 
-            except Exception as error:
-                print(f"{name} exchange error: {error}")
+            except Exception as e:
+                print(f"{name} error:", e)
 
-        print(f"\n✅ Scan completed | Alerts fired: {alerts_fired}\n")
+        print("SCAN COMPLETE")
         time.sleep(LOOP_SECONDS)
-
 
 # =========================================================
 # START
@@ -359,4 +324,4 @@ def bot_loop():
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    bot_loop()
+    bot()
