@@ -14,7 +14,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP = 60
-MIN_SCORE = 70
+MIN_SCORE = 0.65   # normalized score (0–1 system)
+
 MAX_PAIRS = 250
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
@@ -27,7 +28,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ALPHA ENGINE V7 LIVE"
+    return "BALANCED ALPHA ENGINE V8"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
@@ -66,7 +67,7 @@ def f(x):
 def exchanges():
     return {
         "MEXC": ccxt.mexc({"enableRateLimit": True}),
-        "BloFin": ccxt.blofin({"enableRateLimit": True, "timeout": 30000}),
+        "BloFin": ccxt.blofin({"enableRateLimit": True}),
         "Binance": ccxt.binance({
             "enableRateLimit": True,
             "options": {"defaultType": "future"}
@@ -85,7 +86,7 @@ def candles(ex, s, tf="5m", n=40):
         return None
 
 # =========================================================
-# 1. REGIME CLASSIFICATION (FIXED)
+# 1. REGIME (SOFT CLASSIFICATION)
 # =========================================================
 
 def regime(ex, s):
@@ -98,26 +99,23 @@ def regime(ex, s):
     lows = [f(x[3]) for x in c]
 
     trend_up = closes[-1] > closes[-5] > closes[-10]
-    trend_down = closes[-1] < closes[-5] < closes[-10]
 
     range_now = max(highs[-10:]) - min(lows[-10:])
     range_prev = max(highs[-20:-10]) - min(lows[-20:-10])
 
-    compression = range_prev > 0 and (range_prev / max(range_now, 1)) > 1.8
+    compression = range_prev > 0 and range_prev / max(range_now, 1) > 1.8
 
+    if trend_up:
+        return "trend"
     if compression:
         return "compression"
-    if trend_up:
-        return "trend_up"
-    if trend_down:
-        return "trend_down"
-    return "chop"
+    return "neutral"
 
 # =========================================================
-# 2. STRUCTURAL COMPRESSION (IMPROVED)
+# 2. NORMALIZED METRICS (0–1)
 # =========================================================
 
-def compression_strength(ex, s):
+def compression_score(ex, s):
     c = candles(ex, s, "5m", 40)
     if not c:
         return 0
@@ -125,78 +123,40 @@ def compression_strength(ex, s):
     highs = [f(x[2]) for x in c]
     lows = [f(x[3]) for x in c]
 
-    # tighter range + directional bias
-    recent_highs = highs[-15:]
-    recent_lows = lows[-15:]
-
-    older_highs = highs[-30:-15]
-    older_lows = lows[-30:-15]
-
-    if not older_highs or not recent_highs:
-        return 0
-
-    old_range = max(older_highs) - min(older_lows)
-    new_range = max(recent_highs) - min(recent_lows)
+    old_range = max(highs[:20]) - min(lows[:20])
+    new_range = max(highs[-20:]) - min(lows[-20:])
 
     if new_range == 0:
         return 0
 
     ratio = old_range / new_range
 
-    return min(ratio if ratio > 1.5 else 0, 5)
+    return min(ratio / 5, 1)  # normalized 0–1
 
 # =========================================================
-# 3. REAL LIQUIDITY SWEEP (FIXED)
+# 3. BREAKOUT (0–1)
 # =========================================================
 
-def liquidity_sweep(ex, s):
-    c = candles(ex, s, "5m", 10)
-    if not c:
-        return 0
-
-    prev_highs = [f(x[2]) for x in c[:-1]]
-    prev_lows = [f(x[3]) for x in c[:-1]]
-
-    last = c[-1]
-    o, h, l, cl = f(last[1]), f(last[2]), f(last[3]), f(last[4])
-
-    # sweep above previous high + rejection
-    if h > max(prev_highs) and cl < h:
-        return 1
-
-    # sweep below previous low + rejection
-    if l < min(prev_lows) and cl > l:
-        return 1
-
-    return 0
-
-# =========================================================
-# 4. BREAKOUT CONFIRMATION (FIXED)
-# =========================================================
-
-def breakout(ex, s):
+def breakout_score(ex, s):
     c = candles(ex, s, "5m", 20)
     if not c:
         return 0
 
     closes = [f(x[4]) for x in c]
     highs = [f(x[2]) for x in c]
-    vols = [f(x[5]) for x in c]
 
     resistance = max(highs[-15:-1])
 
-    vol_ok = vols[-1] > sum(vols[-6:-1]) / 5
-
-    if closes[-1] > resistance and vol_ok:
-        return 2
+    if closes[-1] > resistance:
+        return 1
 
     return 0
 
 # =========================================================
-# 5. VOLUME EXPANSION
+# 4. VOLUME EXPANSION (0–1)
 # =========================================================
 
-def volume_expansion(ex, s):
+def volume_score(ex, s):
     c = candles(ex, s, "5m", 15)
     if not c:
         return 0
@@ -209,69 +169,68 @@ def volume_expansion(ex, s):
 
     spike = vols[-1] / avg
 
-    return min(max(spike, 0), 8)
+    return min(spike / 5, 1)
 
 # =========================================================
-# 6. OI (SMOOTHED)
+# 5. LIQUIDITY SWEEP (0–1)
 # =========================================================
 
-def oi_change(ex, s, state):
-    if ex.id != "binance":
+def sweep_score(ex, s):
+    c = candles(ex, s, "5m", 10)
+    if not c:
         return 0
 
-    try:
-        data = ex.fetch_open_interest(s)
-        val = f(data.get("openInterest") or data.get("openInterestAmount"))
+    highs = [f(x[2]) for x in c[:-1]]
+    lows = [f(x[3]) for x in c[:-1]]
 
-        key = f"{ex.id}:{s}"
-        old = state.get(key, val)
+    last = c[-1]
+    h, l, cl = f(last[2]), f(last[3]), f(last[4])
 
-        state[key] = val
+    if h > max(highs) and cl < h:
+        return 1
 
-        if old == 0:
-            return 0
+    if l < min(lows) and cl > l:
+        return 1
 
-        return ((val - old) / old) * 100
-
-    except:
-        return 0
+    return 0
 
 # =========================================================
-# SCORE + EXPLANATION ENGINE
+# 6. FINAL SCORE (BALANCED WEIGHTS)
 # =========================================================
 
-def score_and_explain(reg, comp, brk, vol, sweep, oi):
+def final_score(reg, comp, brk, vol, sweep):
 
-    score = 0
+    # HARD FILTER (must have event)
+    if brk == 0 and sweep == 0 and vol < 0.4:
+        return 0, []
+
     reasons = []
 
-    if reg in ["compression", "trend_up"]:
-        score += 10
-        reasons.append("Favorable market regime")
+    score = 0
 
-    if comp > 0:
-        score += comp * 15
-        reasons.append("Structure compression detected")
+    # weights balanced (no domination)
+    score += comp * 0.25
+    score += brk * 0.30
+    score += vol * 0.25
+    score += sweep * 0.20
 
-    if brk > 0:
-        score += 30
+    if reg == "trend":
+        score *= 1.1
+        reasons.append("Trend context")
+
+    if reg == "compression":
+        reasons.append("Compression buildup")
+
+    if brk:
         reasons.append("Breakout confirmed")
 
-    if vol > 2:
-        score += vol * 8
+    if sweep:
+        reasons.append("Liquidity sweep detected")
+
+    if vol > 0.6:
         reasons.append("Volume expansion")
 
-    if sweep:
-        score += 20
-        reasons.append("Liquidity sweep (stop hunt)")
-
-    if oi > 5:
-        score += 10
-        reasons.append("OI expansion (speculative flow)")
-
-    score = min(score, 100)
-
-    return score, reasons
+    return min(score, 1), reasons
 
 # =========================================================
 # MAIN LOOP
@@ -279,9 +238,7 @@ def score_and_explain(reg, comp, brk, vol, sweep, oi):
 
 def run():
 
-    state = {}
-
-    tg("🚀 ALPHA ENGINE V7 STARTED")
+    tg("🚀 BALANCED ALPHA ENGINE V8 STARTED")
 
     while True:
 
@@ -326,45 +283,37 @@ def run():
 
                     reg = regime(ex, s)
 
-                    comp = compression_strength(ex, s)
-                    brk = breakout(ex, s)
-                    volx = volume_expansion(ex, s)
-                    sweep = liquidity_sweep(ex, s)
-                    oi = oi_change(ex, s, state)
+                    comp = compression_score(ex, s)
+                    brk = breakout_score(ex, s)
+                    volx = volume_score(ex, s)
+                    sweep = sweep_score(ex, s)
 
-                    sc, reasons = score_and_explain(reg, comp, brk, volx, sweep, oi)
+                    sc, reasons = final_score(reg, comp, brk, volx, sweep)
 
-                    print(f"{s} | score={sc:.1f} | {reg}")
+                    print(f"{s} | score={sc:.2f} | {reg}")
 
                     if sc < MIN_SCORE:
                         continue
 
-                    # =================================================
-                    # SIGNAL MESSAGE (WITH STRENGTH SUMMARY)
-                    # =================================================
-
-                    strengths = "\n".join([f"• {r}" for r in reasons])
-
                     msg = f"""
-🚨 {name} ALPHA SIGNAL
+🚨 {name} BALANCED SIGNAL
 
 {s}
-Score: {sc:.1f}
+Score: {sc:.2f}
 Regime: {reg}
 
 STRENGTHS:
-{strengths}
+• """ + "\n• ".join(reasons) + f"""
 
-Metrics:
+Metrics (normalized):
 Compression: {comp:.2f}
 Breakout: {brk}
-Volume: {volx:.2f}x
+Volume: {volx:.2f}
 Sweep: {sweep}
-OI: {oi:.1f}%
 """
 
                     tg(msg)
-                    time.sleep(0.3)
+                    time.sleep(0.2)
 
             except Exception as e:
                 print(name, "error:", e)
