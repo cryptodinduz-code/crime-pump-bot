@@ -12,9 +12,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 60   # Back to 60 as you wanted
+ALERT_MIN_SCORE = 58   # Lowered so it sends signals
 
-# Stock filter (remove if you want stocks)
+# Stock filter
 STOCK_KEYWORDS = ["AMD", "META", "TSM", "PAYP", "EWJ", "NVDA", "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"]
 
 app = Flask(__name__)
@@ -26,8 +26,6 @@ def home():
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
-
-current_top_signals = []
 
 def send_telegram(text):
     if not TG_ENABLED: return
@@ -47,11 +45,10 @@ def get_liq_heat(exchange, symbol):
 
 # Main Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v9.4 FULL Started</b>\nScore minimum = 60 | No Stocks")
+    send_telegram("🚀 <b>Crime Bot v9.4 FULL Started</b>\nScore minimum = 58 | No Stocks")
 
     while True:
         print(f"🔍 Scanning at {datetime.datetime.utcnow()}")
-        current_top_signals.clear()
 
         exchanges = {
             "BloFin": ccxt.blofin({"enableRateLimit": True}),
@@ -71,7 +68,7 @@ def bot_loop():
                         continue
 
                     volume = t.get('quoteVolume', 0)
-                    if volume < 5_000_000: 
+                    if volume < 6_000_000: 
                         continue
 
                     # Funding
@@ -99,15 +96,12 @@ def bot_loop():
 
                     # Score
                     score = 0
-                    if abs(funding) > 0.0003: score += 30
+                    if abs(funding) > 0.0003: score += 32
                     if vol_spike: score += 28
                     if liq_heat > 100000: score += 18
                     if t.get('quoteVolume', 0) < 50_000_000: score += 12
 
                     if score >= ALERT_MIN_SCORE:
-                        alert = {"symbol": symbol, "exchange": name, "score": score}
-                        current_top_signals.append(alert)
-
                         send_telegram(f"""🚨 <b>CRIME ALERT</b> (Score: {score}/100)
 🔥 {symbol} on {name}
 
