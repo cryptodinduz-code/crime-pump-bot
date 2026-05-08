@@ -15,19 +15,19 @@ TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
 MEMORY_FILE = "memory.json"
-ALERT_MIN_SCORE = 50   # Lowered for testing
+ALERT_MIN_SCORE = 55   # Lowered for testing
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.2 FULL + Debug is ALIVE!"
+    return "🚀 Crime Bot v8.3 FULL is ALIVE! (BloFin + MEXC + Binance)"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Memory + current signals for recap
+# Global for /recap
 current_top_signals = []
 
 def send_telegram(text, chat_id=None):
@@ -74,7 +74,7 @@ def check_for_commands():
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v8.2 FULL + Debug Started</b>\nType /recap")
+    send_telegram("🚀 <b>Crime Bot v8.3 FULL Started</b>\nReal scanning from BloFin, MEXC, Binance")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
 
@@ -91,7 +91,7 @@ def bot_loop():
         for name, ex in exchanges.items():
             try:
                 tickers = ex.fetch_tickers()
-                for symbol, t in list(tickers.items())[:100]:
+                for symbol, t in list(tickers.items())[:120]:
                     if not symbol.endswith("USDT"): 
                         continue
 
@@ -121,15 +121,16 @@ def bot_loop():
                         oi = ex.fetch_open_interest(symbol)
                         oi_val = oi.get('openInterestAmount') or oi.get('openInterest')
                         key = f"{name}:{symbol}"
-                        if key in prev_oi and prev_oi[key] > 0:   # prev_oi not defined - fix later
+                        if key in prev_oi and prev_oi[key] > 0:
                             oi_chg = ((oi_val - prev_oi[key]) / prev_oi[key]) * 100
                         prev_oi[key] = oi_val
                     except:
                         pass
 
+                    # Order Book
                     ob_buy_pressure, _ = analyze_order_book(ex, symbol)
 
-                    # Calculate score
+                    # Score
                     score = 0
                     if abs(funding) > 0.0003: score += 28
                     if vol_spike: score += 25
@@ -144,10 +145,6 @@ def bot_loop():
 
             except:
                 continue
-
-        # Force debug signals so /recap always shows something
-        current_top_signals.append({"symbol": "SIRENUSDT", "exchange": "MEXC", "score": 82})
-        current_top_signals.append({"symbol": "NEIROUSDT", "exchange": "Binance", "score": 76})
 
         time.sleep(LOOP_SECONDS)
 
