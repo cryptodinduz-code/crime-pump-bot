@@ -12,20 +12,17 @@ from flask import Flask
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
-LOOP_SECONDS = 60
+LOOP = 60
+MIN_SCORE = 60
 
-ALERT_MIN_SCORE = 60
+MIN_VOL = 5_000_000
+MAX_VOL = 400_000_000
 
-MIN_VOLUME = 5_000_000
-MAX_VOLUME = 500_000_000  # widened to avoid over-filtering
+MAX_PAIRS = 200
 
-MAX_PAIRS = 250
-
-COOLDOWN_SECONDS = 1800
-
-MAJOR_COINS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA"}
+MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
 # =========================================================
 # APP
@@ -35,288 +32,255 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "🚀 Scanner LIVE"
+    return "BOT OK"
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    app.run("0.0.0.0", 8080, use_reloader=False)
+
+# =========================================================
+# SAFE NUMBERS
+# =========================================================
+
+def f(x):
+    try:
+        return float(x) if x is not None else 0.0
+    except:
+        return 0.0
+
+def clamp(x, a, b):
+    return max(a, min(b, x))
 
 # =========================================================
 # TELEGRAM
 # =========================================================
 
-def send_telegram(msg):
-    if not TG_ENABLED:
-        print("TG disabled:", msg)
+def tg(msg):
+    if not TG:
+        print(msg)
         return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3900]},
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:4000]},
             timeout=10
         )
-    except Exception as e:
-        print("TG error:", e)
-
-# =========================================================
-# SAFE HELPERS (CRITICAL FIX)
-# =========================================================
-
-def f(x):
-    try:
-        if x is None:
-            return 0.0
-        return float(x)
     except:
-        return 0.0
+        pass
 
 # =========================================================
-# EXCHANGE INIT (FIXED)
+# EXCHANGES
 # =========================================================
 
-def make_exchanges():
-
+def exchanges():
     return {
-        "Binance": ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"}
-        }),
-
-        "MEXC": ccxt.mexc({
-            "enableRateLimit": True,
-            "timeout": 30000,
-            "options": {"defaultType": "swap"}
-        }),
-
-        "BloFin": ccxt.blofin({
-            "enableRateLimit": True,
-            "timeout": 30000
-        })
+        "MEXC": ccxt.mexc({"enableRateLimit": True}),
+        "BloFin": ccxt.blofin({"enableRateLimit": True, "timeout": 30000}),
+        # Binance kept but may fail in US
+        "Binance": ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
     }
 
 # =========================================================
-# CORE SIGNALS
+# METRICS (SAFE)
 # =========================================================
 
-def volume_spike(ex, symbol):
+def vol_spike(ex, s):
     try:
-        c = ex.fetch_ohlcv(symbol, "5m", limit=10)
-        vols = [f(x[5]) for x in c]
-        if len(vols) < 5:
+        c = ex.fetch_ohlcv(s, "5m", limit=10)
+        v = [f(x[5]) for x in c]
+        if len(v) < 6:
             return 0
-        avg = sum(vols[:-1]) / max(len(vols[:-1]), 1)
-        return vols[-1] / avg if avg > 0 else 0
+        avg = sum(v[:-1]) / max(len(v[:-1]), 1)
+        return clamp(v[-1] / avg if avg else 0, 0, 10)
     except:
         return 0
 
-def price_accel(ex, symbol):
+def accel(ex, s):
     try:
-        c = ex.fetch_ohlcv(symbol, "5m", limit=6)
-        if len(c) < 6:
-            return 0
-        return ((f(c[-1][4]) - f(c[0][4])) / max(f(c[0][4]), 1)) * 100
+        c = ex.fetch_ohlcv(s, "5m", limit=6)
+        return clamp(((f(c[-1][4]) - f(c[0][4])) / max(f(c[0][4]), 1)) * 100, -50, 50)
     except:
         return 0
 
-def orderbook_ratio(ex, symbol):
+def ob_ratio(ex, s):
     try:
-        ob = ex.fetch_order_book(symbol, limit=20)
-        bids = sum(f(x[1]) for x in ob.get("bids", []))
-        asks = sum(f(x[1]) for x in ob.get("asks", []))
-        return bids / asks if asks > 0 else 0
+        ob = ex.fetch_order_book(s, 20)
+        b = sum(f(x[1]) for x in ob.get("bids", []))
+        a = sum(f(x[1]) for x in ob.get("asks", []))
+        return clamp(b / a if a else 0, 0, 5)
     except:
         return 0
 
-def oi_change(ex, symbol, state):
+def oi(ex, s, st):
     try:
-        oi = ex.fetch_open_interest(symbol)
-        val = f(
-            oi.get("openInterest")
-            or oi.get("openInterestAmount")
-            or oi.get("openInterestValue")
-        )
-
-        key = f"{ex.id}:{symbol}"
-        prev = state.get(key, 0)
-
-        state[key] = val
-
-        if prev == 0:
+        data = ex.fetch_open_interest(s)
+        val = f(data.get("openInterest") or data.get("openInterestAmount"))
+        key = f"{ex.id}:{s}"
+        old = st.get(key, 0)
+        st[key] = val
+        if old == 0:
             return 0
-
-        return ((val - prev) / prev) * 100
+        return clamp(((val - old) / old) * 100, -100, 100)
     except:
         return 0
 
 # =========================================================
-# MTF (FIXED SAFE)
+# MTF
 # =========================================================
 
-def tf_score(ex, symbol, tf):
+def mtf(ex, s):
     try:
-        c = ex.fetch_ohlcv(symbol, tf, limit=20)
-        if len(c) < 10:
-            return 0
-
+        c = ex.fetch_ohlcv(s, "15m", limit=20)
         closes = [f(x[4]) for x in c]
-        highs = [f(x[2]) for x in c]
-
-        if len(closes) < 5:
+        if len(closes) < 10:
             return 0
-
-        break_high = closes[-1] > max(highs[-10:-1])
-        trend = closes[-1] > closes[-3] > closes[-5]
-
-        score = 0
-        if break_high:
-            score += 1
-        if trend:
-            score += 1
-        return score
+        return clamp((closes[-1] > closes[-5]) * 10 + (closes[-1] > closes[-10]) * 10, 0, 20)
     except:
         return 0
 
-def mtf_alignment(ex, symbol):
-    tf = {
-        "5m": tf_score(ex, symbol, "5m"),
-        "15m": tf_score(ex, symbol, "15m"),
-        "1h": tf_score(ex, symbol, "1h"),
-        "4h": tf_score(ex, symbol, "4h"),
-    }
-
-    score = tf["5m"]*5 + tf["15m"]*10 + tf["1h"]*20 + tf["4h"]*30
-    return score, tf
-
 # =========================================================
-# MAIN LOOP
+# SCORE (FIXED NORMALIZED)
 # =========================================================
 
-def bot():
+def score_all(vs, ac, ob, oi_c, mtf_score):
 
-    prev_oi_state = {}
+    score = 0
+    reasons = []
 
-    send_telegram("🚀 Scanner FIXED version started")
+    # volume
+    if vs > 3:
+        score += 20
+        reasons.append("Volume spike")
+
+    # momentum
+    if ac > 5:
+        score += 20
+        reasons.append("Momentum")
+
+    # orderbook
+    if ob > 1.5:
+        score += 15
+        reasons.append("Buy pressure")
+
+    # oi
+    if oi_c > 10:
+        score += 20
+        reasons.append("OI increase")
+
+    # mtf
+    score += mtf_score
+
+    # HARD CAP (IMPORTANT FIX)
+    score = clamp(score, 0, 100)
+
+    return score, reasons
+
+# =========================================================
+# MAIN
+# =========================================================
+
+def run():
+
+    state = {}
+
+    tg("BOT STARTED")
 
     while True:
 
-        print("\n================ SCAN START ================")
+        exs = exchanges()
 
-        exchanges = make_exchanges()
-
-        for name, ex in exchanges.items():
+        for name, ex in exs.items():
 
             try:
 
+                print(f"\nScanning {name}")
+
                 tickers = ex.fetch_tickers()
-                print(f"{name} tickers: {len(tickers)}")
 
                 if not tickers:
+                    print(f"{name} EMPTY tickers → skip")
                     continue
+
+                print(f"{name} tickers: {len(tickers)}")
+
+                # BLOFIN DEBUG
+                if name == "BloFin":
+                    print("BloFin sample:", list(tickers.items())[:2])
 
                 valid = []
 
-                for sym, t in tickers.items():
+                for s, t in tickers.items():
 
-                    vol = f(t.get("quoteVolume"))
+                    vol = f(t.get("quoteVolume") or t.get("baseVolume"))
 
-                    if vol == 0:
+                    if vol <= 0:
                         continue
 
-                    valid.append((sym, t, vol))
+                    valid.append((s, t, vol))
 
-                # FIXED SAFE SORT (NO NoneType CRASH)
                 valid.sort(key=lambda x: x[2], reverse=True)
 
-                print(f"{name} valid pairs: {len(valid)}")
+                print(f"{name} valid: {len(valid)}")
 
                 scanned = 0
 
-                for sym, t, vol in valid:
+                for s, t, vol in valid:
 
                     if scanned > MAX_PAIRS:
                         break
 
-                    if "USDT" not in sym:
+                    if "USDT" not in s:
                         continue
 
-                    base = sym.split("/")[0]
-                    if base in MAJOR_COINS:
+                    base = s.split("/")[0]
+                    if base in MAJORS:
                         continue
 
-                    if vol < MIN_VOLUME:
+                    if vol < MIN_VOL:
                         continue
 
                     scanned += 1
 
-                    # =========================
-                    # SIGNALS
-                    # =========================
+                    vs = vol_spike(ex, s)
+                    ac = accel(ex, s)
+                    ob = ob_ratio(ex, s)
+                    oi_c = oi(ex, s, state)
+                    mtf_score = mtf(ex, s)
 
-                    vs = volume_spike(ex, sym)
-                    pa = price_accel(ex, sym)
-                    ob = orderbook_ratio(ex, sym)
-                    oi = oi_change(ex, sym, prev_oi_state)
-                    mtf, tfs = mtf_alignment(ex, sym)
+                    score, reasons = score_all(vs, ac, ob, oi_c, mtf_score)
 
-                    # =========================
-                    # DEBUG (IMPORTANT FIX)
-                    # =========================
+                    print(f"{s} score={score}")
 
-                    print(f"{sym} | vol={vs:.2f}x accel={pa:.1f}% oi={oi:.1f}% mtf={mtf}")
+                    # DEBUG FOR BLOFIN SILENCE
+                    if name == "BloFin" and scanned < 3:
+                        print("DEBUG:", s, vs, ac, ob, oi_c, mtf_score)
 
-                    # =========================
-                    # CONFLUENCE
-                    # =========================
-
-                    con = 0
-                    if vs > 3: con += 1
-                    if pa > 4: con += 1
-                    if ob > 1.5: con += 1
-                    if oi > 8: con += 1
-                    if mtf > 20: con += 1
-
-                    if con < 3:
-                        continue
-
-                    # =========================
-                    # SCORE (SIMPLE BUT CLEAN)
-                    # =========================
-
-                    score = (
-                        vs*10 +
-                        pa*2 +
-                        ob*10 +
-                        oi*1.5 +
-                        mtf
-                    )
-
-                    if score < ALERT_MIN_SCORE:
+                    if score < MIN_SCORE:
                         continue
 
                     msg = f"""
-🚨 SIGNAL {name}
+🚨 {name} SIGNAL
 
-{sym}
-Score: {score:.1f}
+{s}
+Score: {score}
 
-VolSpike: {vs:.2f}x
-Accel: {pa:.1f}%
-OI: {oi:.1f}%
+Vol: {vs:.2f}x
+Accel: {ac:.1f}%
 OB: {ob:.2f}
+OI: {oi_c:.1f}%
+MTF: {mtf_score}
 
-MTF: {tfs}
+{reasons}
 """
 
-                    print(msg)
-                    send_telegram(msg)
+                    tg(msg)
 
                     time.sleep(0.5)
 
             except Exception as e:
-                print(f"{name} error:", e)
+                print(name, "error:", e)
 
-        print("SCAN COMPLETE")
-        time.sleep(LOOP_SECONDS)
+        print("SCAN DONE")
+        time.sleep(LOOP)
 
 # =========================================================
 # START
@@ -324,4 +288,4 @@ MTF: {tfs}
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    bot()
+    run()
