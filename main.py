@@ -31,7 +31,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.1 FIXED (/recap working) is ALIVE!"
+    return "🚀 Crime Bot v8.2 FULL is ALIVE! (/recap working)"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -42,7 +42,7 @@ prev_oi = {}
 vol_history = {}
 alerted = {}
 daily_signals = []
-current_top_signals = []   # Fixed for /recap
+current_top_signals = []
 
 def load_memory():
     global prev_oi, vol_history, alerted
@@ -53,6 +53,7 @@ def load_memory():
             prev_oi = data.get("prev_oi", {})
             vol_history = {k: deque(v, maxlen=168) for k, v in data.get("vol_history", {}).items()}
             alerted = data.get("alerted", {})
+            print("✅ Memory loaded")
         except:
             pass
 
@@ -133,7 +134,7 @@ def check_for_commands():
                     chat_id = msg.get("chat", {}).get("id")
                     if text == "/recap" and chat_id:
                         if current_top_signals:
-                            recap = "📊 <b>Current Top Crime Signals</b>\n\n"
+                            recap = "📊 <b>Current Top Crime Signals (v8.2)</b>\n\n"
                             for s in sorted(current_top_signals, key=lambda x: x.get('score',0), reverse=True)[:10]:
                                 recap += f"• <b>{s['symbol']}</b> on {s['exchange']} — Score <b>{s.get('score',0)}</b>\n"
                             send_telegram(recap, chat_id)
@@ -149,24 +150,24 @@ def daily_summary():
         now = datetime.datetime.utcnow()
         if now.hour == 0 and now.minute < 5 and daily_signals:
             top = sorted(daily_signals, key=lambda x: x.get('score',0), reverse=True)[:5]
-            msg = "📊 <b>Daily Crime Summary (v8.1)</b>\n\n"
+            msg = "📊 <b>Daily Crime Summary (v8.2)</b>\n\n"
             for s in top:
                 msg += f"• {s['symbol']} on {s['exchange']} — Score {s.get('score',0)}\n"
             send_telegram(msg)
             daily_signals.clear()
         time.sleep(60)
 
-# Main Loop
+# Main Bot Loop
 def bot_loop():
     load_memory()
-    send_telegram("🚀 <b>Crime Bot v8.1 FULL Online</b>\n/recap should work now")
+    send_telegram("🚀 <b>Crime Bot v8.2 FULL Online</b>\nAll features + /recap fixed")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
     threading.Thread(target=daily_summary, daemon=True).start()
 
     while True:
         print(f"\n🔍 Scanning at {datetime.datetime.utcnow()}")
-        current_top_signals.clear()   # Clear and refill every scan
+        current_top_signals.clear()
 
         for name, ex in exchanges.items():
             try:
@@ -230,7 +231,7 @@ def bot_loop():
                         daily_signals.append(alert)
                         current_top_signals.append(alert)
                         send_telegram(
-                            f"🚨 <b>CRIME ALERT v8.1</b> (Score: {score})\n"
+                            f"🚨 <b>CRIME ALERT v8.2</b> (Score: {score})\n"
                             f"🔥 {symbol} on {name}\n" +
                             "\n".join(signals)
                         )
