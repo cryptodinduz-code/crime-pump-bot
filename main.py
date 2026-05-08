@@ -1,10 +1,18 @@
 # =========================================================
-# INSTITUTIONAL CRIME SCANNER v3.0
+# INSTITUTIONAL CRIME SCANNER v3.1
 # =========================================================
 #
-# FEATURES
+# FIXES:
+# - FIXED BloFin NoneType sorting crash
+# - FIXED missing volume values
+# - FIXED unstable ticker sorting
+# - FIXED bad quoteVolume handling
+# - BETTER error handling
+# - BETTER exchange compatibility
+#
+# FEATURES:
 # - Binance + MEXC + BloFin
-# - Multi-timeframe alignment
+# - Multi-timeframe breakout alignment
 # - Compression breakout detection
 # - Funding flip detection
 # - Short squeeze detection
@@ -16,7 +24,6 @@
 # - Overextension protection
 # - Watchlist system
 # - Elite alert filtering
-# - Cooldown system
 #
 # =========================================================
 
@@ -41,10 +48,6 @@ TG_ENABLED = bool(
 
 LOOP_SECONDS = 60
 
-# =========================================================
-# THRESHOLDS
-# =========================================================
-
 WATCHLIST_SCORE = 45
 ALERT_SCORE = 60
 ELITE_SCORE = 85
@@ -54,12 +57,12 @@ MIN_CONFLUENCE = 4
 MIN_VOLUME = 5_000_000
 MAX_VOLUME = 300_000_000
 
-COOLDOWN_SECONDS = 3600
-
 MAX_PAIRS = 300
 
+COOLDOWN_SECONDS = 3600
+
 # =========================================================
-# MAJORS FILTER
+# FILTERS
 # =========================================================
 
 MAJOR_COINS = [
@@ -90,9 +93,10 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "🚀 Crime Scanner v3 ONLINE"
+    return "🚀 Crime Scanner v3.1 ONLINE"
 
 def run_web():
+
     port = int(
         os.environ.get("PORT", 8080)
     )
@@ -125,13 +129,29 @@ def send_telegram(text):
             timeout=10
         )
 
-        print(r.status_code)
+        print(f"Telegram: {r.status_code}")
 
     except Exception as e:
-        print(e)
+        print(f"Telegram error: {e}")
 
 # =========================================================
-# HELPERS
+# SAFE HELPERS
+# =========================================================
+
+def safe_float(value, default=0.0):
+
+    try:
+
+        if value is None:
+            return default
+
+        return float(value)
+
+    except:
+        return default
+
+# =========================================================
+# METRICS
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -144,7 +164,10 @@ def get_volume_spike(exchange, symbol):
             limit=12
         )
 
-        volumes = [c[5] for c in candles]
+        if not candles or len(candles) < 6:
+            return 0
+
+        volumes = [safe_float(c[5]) for c in candles]
 
         current = volumes[-1]
 
@@ -153,7 +176,7 @@ def get_volume_spike(exchange, symbol):
             len(volumes[:-1])
         )
 
-        if avg == 0:
+        if avg <= 0:
             return 0
 
         return current / avg
@@ -173,10 +196,13 @@ def get_price_acceleration(exchange, symbol):
             limit=6
         )
 
-        first = candles[0][4]
-        last = candles[-1][4]
+        if not candles or len(candles) < 6:
+            return 0
 
-        if first == 0:
+        first = safe_float(candles[0][4])
+        last = safe_float(candles[-1][4])
+
+        if first <= 0:
             return 0
 
         return (
@@ -198,10 +224,13 @@ def get_1h_move(exchange, symbol):
             limit=6
         )
 
-        first = candles[0][4]
-        last = candles[-1][4]
+        if not candles or len(candles) < 6:
+            return 0
 
-        if first == 0:
+        first = safe_float(candles[0][4])
+        last = safe_float(candles[-1][4])
+
+        if first <= 0:
             return 0
 
         return (
@@ -223,22 +252,23 @@ def get_volatility_expansion(exchange, symbol):
             limit=20
         )
 
+        if not candles or len(candles) < 10:
+            return 0
+
         ranges = []
 
         for c in candles:
 
-            high = c[2]
-            low = c[3]
-            close = c[4]
+            high = safe_float(c[2])
+            low = safe_float(c[3])
+            close = safe_float(c[4])
 
-            if close == 0:
+            if close <= 0:
                 continue
 
-            r = (
-                (high - low) / close
-            ) * 100
-
-            ranges.append(r)
+            ranges.append(
+                ((high - low) / close) * 100
+            )
 
         if len(ranges) < 10:
             return 0
@@ -252,7 +282,7 @@ def get_volatility_expansion(exchange, symbol):
             len(ranges[:-5])
         )
 
-        if old == 0:
+        if old <= 0:
             return 0
 
         return recent / old
@@ -272,20 +302,26 @@ def detect_compression_breakout(exchange, symbol):
             limit=24
         )
 
+        if not candles or len(candles) < 10:
+            return False
+
         ranges = []
 
         for c in candles:
 
-            high = c[2]
-            low = c[3]
-            close = c[4]
+            high = safe_float(c[2])
+            low = safe_float(c[3])
+            close = safe_float(c[4])
 
-            if close == 0:
+            if close <= 0:
                 continue
 
             ranges.append(
                 ((high - low) / close) * 100
             )
+
+        if len(ranges) < 10:
+            return False
 
         recent_vol = (
             sum(ranges[-3:]) / 3
@@ -297,7 +333,6 @@ def detect_compression_breakout(exchange, symbol):
         )
 
         compression = old_vol < 2
-
         breakout = recent_vol > old_vol * 1.8
 
         return compression and breakout
@@ -319,10 +354,18 @@ def analyze_orderbook(exchange, symbol):
         bids = ob.get("bids", [])
         asks = ob.get("asks", [])
 
-        bid_vol = sum(b[1] for b in bids)
-        ask_vol = sum(a[1] for a in asks)
+        if not bids or not asks:
+            return 0
 
-        if ask_vol == 0:
+        bid_vol = sum(
+            safe_float(b[1]) for b in bids
+        )
+
+        ask_vol = sum(
+            safe_float(a[1]) for a in asks
+        )
+
+        if ask_vol <= 0:
             return 0
 
         return bid_vol / ask_vol
@@ -343,14 +386,20 @@ def detect_thin_liquidity(exchange, symbol):
 
         asks = ob.get("asks", [])
 
-        if len(asks) < 10:
+        if not asks or len(asks) < 10:
             return False
 
-        first_asks = sum(a[1] for a in asks[:10])
+        first_asks = sum(
+            safe_float(a[1])
+            for a in asks[:10]
+        )
 
-        total_asks = sum(a[1] for a in asks)
+        total_asks = sum(
+            safe_float(a[1])
+            for a in asks
+        )
 
-        if total_asks == 0:
+        if total_asks <= 0:
             return False
 
         ratio = first_asks / total_asks
@@ -362,10 +411,7 @@ def detect_thin_liquidity(exchange, symbol):
 
 # =========================================================
 
-def get_open_interest_change(
-    exchange,
-    symbol
-):
+def get_open_interest_change(exchange, symbol):
 
     try:
 
@@ -379,10 +425,10 @@ def get_open_interest_change(
             or oi.get("openInterestValue")
         )
 
-        if value is None:
-            return 0
+        value = safe_float(value)
 
-        value = float(value)
+        if value <= 0:
+            return 0
 
         key = (
             f"{exchange.id}:{symbol}"
@@ -392,7 +438,7 @@ def get_open_interest_change(
 
         if key in prev_oi:
 
-            old = prev_oi[key]
+            old = safe_float(prev_oi[key])
 
             if old > 0:
 
@@ -417,7 +463,7 @@ def get_funding(exchange, symbol):
             symbol
         )
 
-        funding = float(
+        funding = safe_float(
             fr.get("fundingRate", 0)
         )
 
@@ -443,10 +489,7 @@ def get_funding(exchange, symbol):
 
 # =========================================================
 
-def detect_funding_flip(
-    exchange,
-    symbol
-):
+def detect_funding_flip(exchange, symbol):
 
     key = f"{exchange.id}:{symbol}"
 
@@ -468,13 +511,13 @@ def detect_funding_flip(
 def detect_short_squeeze(
     funding,
     oi_change,
-    price_accel
+    accel
 ):
 
     return (
         funding < 0 and
         oi_change > 10 and
-        price_accel > 4
+        accel > 4
     )
 
 # =========================================================
@@ -492,6 +535,9 @@ def detect_consecutive_buying(
             limit=5
         )
 
+        if not candles or len(candles) < 5:
+            return False
+
         greens = 0
 
         increasing_volume = True
@@ -500,9 +546,9 @@ def detect_consecutive_buying(
 
         for c in candles:
 
-            open_price = c[1]
-            close_price = c[4]
-            volume = c[5]
+            open_price = safe_float(c[1])
+            close_price = safe_float(c[4])
+            volume = safe_float(c[5])
 
             if close_price > open_price:
                 greens += 1
@@ -532,7 +578,13 @@ def market_regime_filter(exchange):
             limit=50
         )
 
-        closes = [c[4] for c in candles]
+        if not candles or len(candles) < 20:
+            return True
+
+        closes = [
+            safe_float(c[4])
+            for c in candles
+        ]
 
         current = closes[-1]
 
@@ -561,9 +613,23 @@ def analyze_timeframe(
             limit=40
         )
 
-        closes = [c[4] for c in candles]
-        highs = [c[2] for c in candles]
-        volumes = [c[5] for c in candles]
+        if not candles or len(candles) < 15:
+            return 0
+
+        closes = [
+            safe_float(c[4])
+            for c in candles
+        ]
+
+        highs = [
+            safe_float(c[2])
+            for c in candles
+        ]
+
+        volumes = [
+            safe_float(c[5])
+            for c in candles
+        ]
 
         current_close = closes[-1]
 
@@ -591,6 +657,7 @@ def analyze_timeframe(
             score += 1
 
         if (
+            avg_volume > 0 and
             current_volume >
             avg_volume * 1.5
         ):
@@ -616,6 +683,7 @@ def get_mtf_alignment(
 ):
 
     tf = {
+
         "5m": analyze_timeframe(
             exchange,
             symbol,
@@ -680,10 +748,6 @@ def calculate_score(
     score = 0
     reasons = []
 
-    # =====================================================
-    # VOLUME
-    # =====================================================
-
     if vol_ratio >= 5:
 
         score += 30
@@ -697,10 +761,6 @@ def calculate_score(
         reasons.append(
             f"Strong Volume {vol_ratio:.1f}x"
         )
-
-    # =====================================================
-    # OI
-    # =====================================================
 
     if oi_change >= 20:
 
@@ -716,10 +776,6 @@ def calculate_score(
             f"Strong OI +{oi_change:.1f}%"
         )
 
-    # =====================================================
-    # VOLATILITY
-    # =====================================================
-
     if vol_expansion >= 2:
 
         score += 15
@@ -727,20 +783,12 @@ def calculate_score(
             "Volatility Expansion"
         )
 
-    # =====================================================
-    # ORDERBOOK
-    # =====================================================
-
     if ob_ratio >= 2:
 
         score += 15
         reasons.append(
             f"Buy Pressure {ob_ratio:.2f}"
         )
-
-    # =====================================================
-    # ACCELERATION
-    # =====================================================
 
     if accel >= 8:
 
@@ -756,10 +804,6 @@ def calculate_score(
             f"Momentum +{accel:.1f}%"
         )
 
-    # =====================================================
-    # FUNDING
-    # =====================================================
-
     if funding < -0.0001:
 
         score += 10
@@ -767,21 +811,7 @@ def calculate_score(
             "Crowded Shorts"
         )
 
-    # =====================================================
-    # MTF
-    # =====================================================
-
     score += mtf_score
-
-    if mtf_score >= 60:
-
-        reasons.append(
-            "Elite Multi-TF"
-        )
-
-    # =====================================================
-    # COMPRESSION BREAKOUT
-    # =====================================================
 
     if compression_breakout:
 
@@ -790,20 +820,12 @@ def calculate_score(
             "Compression Breakout"
         )
 
-    # =====================================================
-    # THIN LIQUIDITY
-    # =====================================================
-
     if thin_liquidity:
 
         score += 15
         reasons.append(
             "Thin Liquidity Above"
         )
-
-    # =====================================================
-    # FUNDING FLIP
-    # =====================================================
 
     if funding_flip:
 
@@ -812,10 +834,6 @@ def calculate_score(
             "Funding Flip"
         )
 
-    # =====================================================
-    # SHORT SQUEEZE
-    # =====================================================
-
     if short_squeeze:
 
         score += 20
@@ -823,20 +841,12 @@ def calculate_score(
             "Short Squeeze Setup"
         )
 
-    # =====================================================
-    # BUYING STACK
-    # =====================================================
-
     if consecutive_buying:
 
         score += 15
         reasons.append(
             "Aggressive Buying"
         )
-
-    # =====================================================
-    # MIDCAP BONUS
-    # =====================================================
 
     if (
         5_000_000 <= volume <=
@@ -857,7 +867,7 @@ def calculate_score(
 def bot_loop():
 
     send_telegram(
-        "🚀 Crime Scanner v3 Started"
+        "🚀 Crime Scanner v3.1 Started"
     )
 
     while True:
@@ -892,6 +902,8 @@ def bot_loop():
 
             try:
 
+                print(f"\n🔍 Scanning {name}")
+
                 bullish_market = (
                     market_regime_filter(
                         exchange
@@ -910,22 +922,49 @@ def bot_loop():
 
                 tickers = exchange.fetch_tickers()
 
-                sorted_tickers = sorted(
-                    tickers.items(),
-                    key=lambda x: (
-                        x[1].get(
-                            "quoteVolume",
-                            0
+                # =====================================================
+                # FIXED NONE SORTING ISSUE HERE
+                # =====================================================
+
+                valid_tickers = []
+
+                for symbol, ticker in tickers.items():
+
+                    try:
+
+                        volume = safe_float(
+                            ticker.get(
+                                "quoteVolume",
+                                0
+                            )
                         )
-                    ),
+
+                        valid_tickers.append(
+                            (
+                                symbol,
+                                ticker,
+                                volume
+                            )
+                        )
+
+                    except:
+                        continue
+
+                sorted_tickers = sorted(
+                    valid_tickers,
+                    key=lambda x: x[2],
                     reverse=True
                 )
 
                 scanned = 0
 
-                for symbol, ticker in sorted_tickers:
+                for item in sorted_tickers:
 
                     try:
+
+                        symbol = item[0]
+                        ticker = item[1]
+                        volume = item[2]
 
                         if scanned >= MAX_PAIRS:
                             break
@@ -950,16 +989,6 @@ def bot_loop():
 
                         if base in MAJOR_COINS:
                             continue
-
-                        volume = ticker.get(
-                            "quoteVolume",
-                            0
-                        )
-
-                        if volume is None:
-                            continue
-
-                        volume = float(volume)
 
                         if (
                             volume < MIN_VOLUME
@@ -986,9 +1015,9 @@ def bot_loop():
                             ):
                                 continue
 
-                        # =====================
+                        # =================================================
                         # METRICS
-                        # =====================
+                        # =================================================
 
                         vol_ratio = (
                             get_volume_spike(
@@ -1082,16 +1111,16 @@ def bot_loop():
                             )
                         )
 
-                        # =====================
-                        # EARLY STAGE FILTER
-                        # =====================
+                        # =================================================
+                        # OVEREXTENSION FILTER
+                        # =================================================
 
                         if move_1h > 18:
                             continue
 
-                        # =====================
+                        # =================================================
                         # CONFLUENCE
-                        # =====================
+                        # =================================================
 
                         confluence = 0
 
@@ -1122,9 +1151,9 @@ def bot_loop():
                         if confluence < MIN_CONFLUENCE:
                             continue
 
-                        # =====================
+                        # =================================================
                         # SCORE
-                        # =====================
+                        # =================================================
 
                         score, reasons = (
                             calculate_score(
@@ -1144,9 +1173,9 @@ def bot_loop():
                             )
                         )
 
-                        # =====================
-                        # WATCHLIST
-                        # =====================
+                        # =================================================
+                        # TIERS
+                        # =================================================
 
                         tier = None
 
@@ -1203,17 +1232,19 @@ def bot_loop():
                         time.sleep(1)
 
                     except Exception as e:
+
                         print(
                             f"Pair error "
                             f"{symbol}: {e}"
                         )
 
             except Exception as e:
+
                 print(
                     f"{name} error: {e}"
                 )
 
-        print("Scan complete")
+        print("\n✅ Scan complete")
 
         time.sleep(LOOP_SECONDS)
 
