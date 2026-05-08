@@ -4,7 +4,6 @@ import time
 import datetime
 import threading
 import requests
-from collections import deque
 from flask import Flask
 
 # ================== CONFIG ==================
@@ -13,26 +12,27 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 65
+ALERT_MIN_SCORE = 60
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v9.5 FIXED is ALIVE!"
+    return "🚀 Crime Bot v9.5 FULL is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Global for recap (last 10 minutes of signals)
+# Global for recap
 current_top_signals = []
 
-def send_telegram(text):
+def send_telegram(text, chat_id=None):
     if not TG_ENABLED: return
+    target = chat_id or TELEGRAM_CHAT_ID
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"})
+                      json={"chat_id": target, "text": text, "parse_mode": "HTML"})
     except:
         pass
 
@@ -55,7 +55,7 @@ def get_liq_heat(exchange, symbol):
     except:
         return 0
 
-# /recap Command
+# /recap Command (reliable polling)
 def check_for_commands():
     offset = 0
     while True:
@@ -79,7 +79,7 @@ def check_for_commands():
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v9.5 FIXED Started</b>\n/recap should work now")
+    send_telegram("🚀 <b>Crime Bot v9.5 FULL Started</b>\n/recap command active")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
 
@@ -98,7 +98,7 @@ def bot_loop():
         for name, ex in exchanges.items():
             try:
                 tickers = ex.fetch_tickers()
-                for symbol, t in list(tickers.items())[:100]:
+                for symbol, t in list(tickers.items())[:120]:
                     if not symbol.endswith("USDT"): 
                         continue
 
@@ -166,7 +166,7 @@ Early Signals:
 • Extreme Funding
 • Volume Spike {vol_ratio:.1f}x
 • OI Growth
-• {'Buy Wall' if ob_buy_pressure else 'Neutral Order Book'}
+• {'Strong Buy Wall' if ob_buy_pressure else 'Neutral'}
 • {'Liquidation Pressure' if liq_heat > 100000 else ''}""")
 
             except:
