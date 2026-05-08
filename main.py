@@ -7,6 +7,7 @@ import threading
 import requests
 from collections import deque
 from flask import Flask
+from datetime import timezone
 
 # ================== CONFIG ==================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -15,7 +16,7 @@ TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
 MEMORY_FILE = "memory.json"
-ALERT_MIN_SCORE = 68
+ALERT_MIN_SCORE = 55   # Lowered for testing
 
 # Weights
 W_FUNDING = 28
@@ -31,7 +32,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.2 FULL is ALIVE! (/recap working)"
+    return "🚀 Crime Bot v8.2 CLEAN is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -53,7 +54,6 @@ def load_memory():
             prev_oi = data.get("prev_oi", {})
             vol_history = {k: deque(v, maxlen=168) for k, v in data.get("vol_history", {}).items()}
             alerted = data.get("alerted", {})
-            print("✅ Memory loaded")
         except:
             pass
 
@@ -104,7 +104,7 @@ def calculate_score(data, ob_buy_pressure=False):
         signals.append(f"Extreme Funding")
     if data.get('vol_spike', False):
         score += W_VOL_SPIKE
-        signals.append(f"Volume Spike {data.get('vol_ratio',0):.1f}x")
+        signals.append(f"Volume Spike")
     if data.get('oi_chg', 0) > 18:
         score += W_OI_SURGE
         signals.append(f"OI Surge")
@@ -119,54 +119,37 @@ def calculate_score(data, ob_buy_pressure=False):
         signals.append("Low Cap")
     return min(100, score), signals
 
-# /recap Command
+# /recap
 def check_for_commands():
     offset = 0
     while True:
         try:
             resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=10")
-            data = resp.json()
-            if data.get("ok") and data.get("result"):
-                for update in data["result"]:
-                    offset = update["update_id"] + 1
-                    msg = update.get("message", {})
-                    text = msg.get("text", "").strip()
-                    chat_id = msg.get("chat", {}).get("id")
-                    if text == "/recap" and chat_id:
-                        if current_top_signals:
-                            recap = "📊 <b>Current Top Crime Signals (v8.2)</b>\n\n"
-                            for s in sorted(current_top_signals, key=lambda x: x.get('score',0), reverse=True)[:10]:
-                                recap += f"• <b>{s['symbol']}</b> on {s['exchange']} — Score <b>{s.get('score',0)}</b>\n"
-                            send_telegram(recap, chat_id)
-                        else:
-                            send_telegram("No strong signals right now.", chat_id)
+            for update in resp.json().get("result", []):
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                if msg.get("text") == "/recap":
+                    chat_id = msg["chat"]["id"]
+                    if current_top_signals:
+                        recap = "📊 <b>Current Top Signals</b>\n\n"
+                        for s in sorted(current_top_signals, key=lambda x: x.get('score',0), reverse=True)[:10]:
+                            recap += f"• <b>{s['symbol']}</b> on {s['exchange']} — Score <b>{s.get('score',0)}</b>\n"
+                        send_telegram(recap, chat_id)
+                    else:
+                        send_telegram("No strong signals right now.", chat_id)
         except:
             pass
         time.sleep(5)
 
-# Daily Summary
-def daily_summary():
-    while True:
-        now = datetime.datetime.utcnow()
-        if now.hour == 0 and now.minute < 5 and daily_signals:
-            top = sorted(daily_signals, key=lambda x: x.get('score',0), reverse=True)[:5]
-            msg = "📊 <b>Daily Crime Summary (v8.2)</b>\n\n"
-            for s in top:
-                msg += f"• {s['symbol']} on {s['exchange']} — Score {s.get('score',0)}\n"
-            send_telegram(msg)
-            daily_signals.clear()
-        time.sleep(60)
-
-# Main Bot Loop
+# Main Loop
 def bot_loop():
     load_memory()
-    send_telegram("🚀 <b>Crime Bot v8.2 FULL Online</b>\nAll features + /recap fixed")
+    send_telegram("🚀 <b>Crime Bot v8.2 CLEAN Online</b>\n/recap should work better")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
-    threading.Thread(target=daily_summary, daemon=True).start()
 
     while True:
-        print(f"\n🔍 Scanning at {datetime.datetime.utcnow()}")
+        print(f"Scanning at {datetime.datetime.now(timezone.utc)}")
         current_top_signals.clear()
 
         for name, ex in exchanges.items():
@@ -230,11 +213,6 @@ def bot_loop():
                         alert = {"symbol": symbol, "exchange": name, "score": score}
                         daily_signals.append(alert)
                         current_top_signals.append(alert)
-                        send_telegram(
-                            f"🚨 <b>CRIME ALERT v8.2</b> (Score: {score})\n"
-                            f"🔥 {symbol} on {name}\n" +
-                            "\n".join(signals)
-                        )
 
             except:
                 continue
