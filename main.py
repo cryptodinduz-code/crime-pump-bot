@@ -17,10 +17,7 @@ TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 LOOP = 60
 MIN_SCORE = 60
 
-MIN_VOL = 5_000_000
-MAX_VOL = 400_000_000
-
-MAX_PAIRS = 200
+MAX_PAIRS = 300
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
@@ -32,23 +29,10 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "BOT OK"
+    return "BOT RUNNING"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
-
-# =========================================================
-# SAFE NUMBERS
-# =========================================================
-
-def f(x):
-    try:
-        return float(x) if x is not None else 0.0
-    except:
-        return 0.0
-
-def clamp(x, a, b):
-    return max(a, min(b, x))
 
 # =========================================================
 # TELEGRAM
@@ -68,36 +52,48 @@ def tg(msg):
         pass
 
 # =========================================================
+# SAFE NUMBER PARSER
+# =========================================================
+
+def f(x):
+    try:
+        return float(x) if x is not None else 0.0
+    except:
+        return 0.0
+
+# =========================================================
 # EXCHANGES
 # =========================================================
 
-def exchanges():
+def get_exchanges():
     return {
         "MEXC": ccxt.mexc({"enableRateLimit": True}),
         "BloFin": ccxt.blofin({"enableRateLimit": True, "timeout": 30000}),
-        # Binance kept but may fail in US
-        "Binance": ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+        "Binance": ccxt.binance({
+            "enableRateLimit": True,
+            "options": {"defaultType": "future"}
+        })
     }
 
 # =========================================================
-# METRICS (SAFE)
+# METRICS
 # =========================================================
 
 def vol_spike(ex, s):
     try:
         c = ex.fetch_ohlcv(s, "5m", limit=10)
         v = [f(x[5]) for x in c]
-        if len(v) < 6:
+        if len(v) < 5:
             return 0
         avg = sum(v[:-1]) / max(len(v[:-1]), 1)
-        return clamp(v[-1] / avg if avg else 0, 0, 10)
+        return v[-1] / avg if avg > 0 else 0
     except:
         return 0
 
 def accel(ex, s):
     try:
         c = ex.fetch_ohlcv(s, "5m", limit=6)
-        return clamp(((f(c[-1][4]) - f(c[0][4])) / max(f(c[0][4]), 1)) * 100, -50, 50)
+        return ((f(c[-1][4]) - f(c[0][4])) / max(f(c[0][4]), 1)) * 100
     except:
         return 0
 
@@ -106,20 +102,23 @@ def ob_ratio(ex, s):
         ob = ex.fetch_order_book(s, 20)
         b = sum(f(x[1]) for x in ob.get("bids", []))
         a = sum(f(x[1]) for x in ob.get("asks", []))
-        return clamp(b / a if a else 0, 0, 5)
+        return b / a if a > 0 else 0
     except:
         return 0
 
-def oi(ex, s, st):
+def oi_change(ex, s, state):
     try:
         data = ex.fetch_open_interest(s)
         val = f(data.get("openInterest") or data.get("openInterestAmount"))
+
         key = f"{ex.id}:{s}"
-        old = st.get(key, 0)
-        st[key] = val
+        old = state.get(key, 0)
+        state[key] = val
+
         if old == 0:
             return 0
-        return clamp(((val - old) / old) * 100, -100, 100)
+
+        return ((val - old) / old) * 100
     except:
         return 0
 
@@ -127,66 +126,58 @@ def oi(ex, s, st):
 # MTF
 # =========================================================
 
-def mtf(ex, s):
+def mtf_score(ex, s):
     try:
         c = ex.fetch_ohlcv(s, "15m", limit=20)
         closes = [f(x[4]) for x in c]
         if len(closes) < 10:
             return 0
-        return clamp((closes[-1] > closes[-5]) * 10 + (closes[-1] > closes[-10]) * 10, 0, 20)
+
+        score = 0
+        if closes[-1] > max(closes[-10:]):
+            score += 10
+        if closes[-1] > closes[-5]:
+            score += 10
+
+        return score
     except:
         return 0
 
 # =========================================================
-# SCORE (FIXED NORMALIZED)
+# SCORE
 # =========================================================
 
-def score_all(vs, ac, ob, oi_c, mtf_score):
+def score(vs, ac, ob, oi, mtf):
 
-    score = 0
-    reasons = []
+    s = 0
 
-    # volume
     if vs > 3:
-        score += 20
-        reasons.append("Volume spike")
-
-    # momentum
+        s += 20
     if ac > 5:
-        score += 20
-        reasons.append("Momentum")
-
-    # orderbook
+        s += 20
     if ob > 1.5:
-        score += 15
-        reasons.append("Buy pressure")
+        s += 15
+    if oi > 10:
+        s += 20
 
-    # oi
-    if oi_c > 10:
-        score += 20
-        reasons.append("OI increase")
+    s += mtf
 
-    # mtf
-    score += mtf_score
-
-    # HARD CAP (IMPORTANT FIX)
-    score = clamp(score, 0, 100)
-
-    return score, reasons
+    # HARD CAP (IMPORTANT)
+    return min(s, 100)
 
 # =========================================================
-# MAIN
+# MAIN LOOP
 # =========================================================
 
 def run():
 
     state = {}
 
-    tg("BOT STARTED")
+    tg("BOT STARTED FIXED VERSION")
 
     while True:
 
-        exs = exchanges()
+        exs = get_exchanges()
 
         for name, ex in exs.items():
 
@@ -194,92 +185,118 @@ def run():
 
                 print(f"\nScanning {name}")
 
+                # =================================================
+                # FIX 1: SAFE LOAD MARKETS
+                # =================================================
+
+                try:
+                    ex.load_markets()
+                except:
+                    pass
+
                 tickers = ex.fetch_tickers()
 
+                print(f"{name} raw tickers: {len(tickers)}")
+
                 if not tickers:
-                    print(f"{name} EMPTY tickers → skip")
+                    print(f"{name} EMPTY")
                     continue
 
-                print(f"{name} tickers: {len(tickers)}")
+                # =================================================
+                # FIX 2: BUILD FULL UNIVERSE FIRST (IMPORTANT)
+                # =================================================
 
-                # BLOFIN DEBUG
-                if name == "BloFin":
-                    print("BloFin sample:", list(tickers.items())[:2])
-
-                valid = []
+                universe = []
 
                 for s, t in tickers.items():
 
-                    vol = f(t.get("quoteVolume") or t.get("baseVolume"))
+                    vol = f(
+                        t.get("quoteVolume")
+                        or t.get("baseVolume")
+                    )
 
                     if vol <= 0:
                         continue
 
-                    valid.append((s, t, vol))
+                    universe.append((s, t, vol))
 
-                valid.sort(key=lambda x: x[2], reverse=True)
+                # =================================================
+                # FIX 3: SORT BEFORE FILTERING
+                # =================================================
 
-                print(f"{name} valid: {len(valid)}")
+                universe.sort(
+                    key=lambda x: x[2],
+                    reverse=True
+                )
+
+                universe = universe[:MAX_PAIRS]
+
+                print(f"{name} universe: {len(universe)}")
 
                 scanned = 0
+                skipped = 0
 
-                for s, t, vol in valid:
+                for s, t, vol in universe:
 
                     if scanned > MAX_PAIRS:
                         break
 
-                    if "USDT" not in s:
+                    # =================================================
+                    # FIX 4: SYMBOL FILTER (SAFE)
+                    # =================================================
+
+                    if not any(x in s for x in ["/USDT", "-USDT"]):
+                        skipped += 1
                         continue
 
                     base = s.split("/")[0]
                     if base in MAJORS:
                         continue
 
-                    if vol < MIN_VOL:
-                        continue
-
                     scanned += 1
+
+                    # =================================================
+                    # METRICS
+                    # =================================================
 
                     vs = vol_spike(ex, s)
                     ac = accel(ex, s)
                     ob = ob_ratio(ex, s)
-                    oi_c = oi(ex, s, state)
-                    mtf_score = mtf(ex, s)
+                    oi = oi_change(ex, s, state)
+                    mtf = mtf_score(ex, s)
 
-                    score, reasons = score_all(vs, ac, ob, oi_c, mtf_score)
+                    # DEBUG
+                    print(f"{s} | vs={vs:.2f} ac={ac:.1f} oi={oi:.1f} mtf={mtf}")
 
-                    print(f"{s} score={score}")
+                    sc = score(vs, ac, ob, oi, mtf)
 
-                    # DEBUG FOR BLOFIN SILENCE
-                    if name == "BloFin" and scanned < 3:
-                        print("DEBUG:", s, vs, ac, ob, oi_c, mtf_score)
-
-                    if score < MIN_SCORE:
+                    if sc < MIN_SCORE:
                         continue
 
                     msg = f"""
 🚨 {name} SIGNAL
 
 {s}
-Score: {score}
+Score: {sc}
 
-Vol: {vs:.2f}x
+VolSpike: {vs:.2f}x
 Accel: {ac:.1f}%
 OB: {ob:.2f}
-OI: {oi_c:.1f}%
-MTF: {mtf_score}
-
-{reasons}
+OI: {oi:.1f}%
+MTF: {mtf}
 """
 
+                    print(msg)
                     tg(msg)
 
-                    time.sleep(0.5)
+                    time.sleep(0.3)
+
+                print(f"{name} scanned={scanned} skipped={skipped}")
 
             except Exception as e:
-                print(name, "error:", e)
+                print(f"{name} error:", e)
 
-        print("SCAN DONE")
+        print("SCAN COMPLETE")
         time.sleep(LOOP)
 
 # =========================================================
