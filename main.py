@@ -12,27 +12,23 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 60
+ALERT_MIN_SCORE = 60   # as you wanted
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v9.5 FULL is ALIVE!"
+    return "🚀 Crime Bot v9.5 BEST is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Global for recap
-current_top_signals = []
-
-def send_telegram(text, chat_id=None):
+def send_telegram(text):
     if not TG_ENABLED: return
-    target = chat_id or TELEGRAM_CHAT_ID
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id": target, "text": text, "parse_mode": "HTML"})
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"})
     except:
         pass
 
@@ -55,39 +51,14 @@ def get_liq_heat(exchange, symbol):
     except:
         return 0
 
-# /recap Command (reliable polling)
-def check_for_commands():
-    offset = 0
-    while True:
-        try:
-            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=10")
-            for update in resp.json().get("result", []):
-                offset = update["update_id"] + 1
-                msg = update.get("message", {})
-                if msg.get("text") == "/recap":
-                    chat_id = msg["chat"]["id"]
-                    if current_top_signals:
-                        recap = "📊 <b>Current Top Crime Signals</b>\n\n"
-                        for s in sorted(current_top_signals, key=lambda x: x.get('score',0), reverse=True)[:10]:
-                            recap += f"• <b>{s['symbol']}</b> on {s['exchange']} — Score <b>{s.get('score',0)}</b>\n"
-                        send_telegram(recap, chat_id)
-                    else:
-                        send_telegram("No strong signals right now.", chat_id)
-        except:
-            pass
-        time.sleep(5)
-
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v9.5 FULL Started</b>\n/recap command active")
-
-    threading.Thread(target=check_for_commands, daemon=True).start()
+    send_telegram("🚀 <b>Crime Bot v9.5 BEST Started</b>\nScore minimum = 60 | Full features")
 
     prev_oi = {}
 
     while True:
         print(f"🔍 Scanning at {datetime.datetime.utcnow()}")
-        current_top_signals.clear()
 
         exchanges = {
             "BloFin": ccxt.blofin({"enableRateLimit": True}),
@@ -152,8 +123,6 @@ def bot_loop():
                     if volume < 50_000_000: score += 10
 
                     if score >= ALERT_MIN_SCORE:
-                        alert = {"symbol": symbol, "exchange": name, "score": score}
-                        current_top_signals.append(alert)
                         send_telegram(f"""🚨 <b>CRIME ALERT</b> (Score: {score}/100)
 🔥 {symbol} on {name}
 
@@ -166,7 +135,7 @@ Early Signals:
 • Extreme Funding
 • Volume Spike {vol_ratio:.1f}x
 • OI Growth
-• {'Strong Buy Wall' if ob_buy_pressure else 'Neutral'}
+• {'Strong Buy Wall' if ob_buy_pressure else 'Neutral Order Book'}
 • {'Liquidation Pressure' if liq_heat > 100000 else ''}""")
 
             except:
