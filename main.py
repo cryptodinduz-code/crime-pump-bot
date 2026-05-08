@@ -1,7 +1,6 @@
 import ccxt
 import os
 import time
-import datetime
 import threading
 import requests
 from flask import Flask
@@ -15,9 +14,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP = 60
-MIN_SCORE = 60
-
-MAX_PAIRS = 300
+MIN_SCORE = 70
+MAX_PAIRS = 250
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
@@ -29,7 +27,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "BOT RUNNING"
+    return "ALPHA ENGINE V7 LIVE"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
@@ -52,7 +50,7 @@ def tg(msg):
         pass
 
 # =========================================================
-# SAFE NUMBER PARSER
+# SAFE FLOAT
 # =========================================================
 
 def f(x):
@@ -65,7 +63,7 @@ def f(x):
 # EXCHANGES
 # =========================================================
 
-def get_exchanges():
+def exchanges():
     return {
         "MEXC": ccxt.mexc({"enableRateLimit": True}),
         "BloFin": ccxt.blofin({"enableRateLimit": True, "timeout": 30000}),
@@ -76,94 +74,204 @@ def get_exchanges():
     }
 
 # =========================================================
-# METRICS
+# CANDLES
 # =========================================================
 
-def vol_spike(ex, s):
+def candles(ex, s, tf="5m", n=40):
     try:
-        c = ex.fetch_ohlcv(s, "5m", limit=10)
-        v = [f(x[5]) for x in c]
-        if len(v) < 5:
-            return 0
-        avg = sum(v[:-1]) / max(len(v[:-1]), 1)
-        return v[-1] / avg if avg > 0 else 0
+        c = ex.fetch_ohlcv(s, tf, limit=n)
+        return c if len(c) > 20 else None
     except:
+        return None
+
+# =========================================================
+# 1. REGIME CLASSIFICATION (FIXED)
+# =========================================================
+
+def regime(ex, s):
+    c = candles(ex, s, "15m", 40)
+    if not c:
+        return "none"
+
+    closes = [f(x[4]) for x in c]
+    highs = [f(x[2]) for x in c]
+    lows = [f(x[3]) for x in c]
+
+    trend_up = closes[-1] > closes[-5] > closes[-10]
+    trend_down = closes[-1] < closes[-5] < closes[-10]
+
+    range_now = max(highs[-10:]) - min(lows[-10:])
+    range_prev = max(highs[-20:-10]) - min(lows[-20:-10])
+
+    compression = range_prev > 0 and (range_prev / max(range_now, 1)) > 1.8
+
+    if compression:
+        return "compression"
+    if trend_up:
+        return "trend_up"
+    if trend_down:
+        return "trend_down"
+    return "chop"
+
+# =========================================================
+# 2. STRUCTURAL COMPRESSION (IMPROVED)
+# =========================================================
+
+def compression_strength(ex, s):
+    c = candles(ex, s, "5m", 40)
+    if not c:
         return 0
 
-def accel(ex, s):
-    try:
-        c = ex.fetch_ohlcv(s, "5m", limit=6)
-        return ((f(c[-1][4]) - f(c[0][4])) / max(f(c[0][4]), 1)) * 100
-    except:
+    highs = [f(x[2]) for x in c]
+    lows = [f(x[3]) for x in c]
+
+    # tighter range + directional bias
+    recent_highs = highs[-15:]
+    recent_lows = lows[-15:]
+
+    older_highs = highs[-30:-15]
+    older_lows = lows[-30:-15]
+
+    if not older_highs or not recent_highs:
         return 0
 
-def ob_ratio(ex, s):
-    try:
-        ob = ex.fetch_order_book(s, 20)
-        b = sum(f(x[1]) for x in ob.get("bids", []))
-        a = sum(f(x[1]) for x in ob.get("asks", []))
-        return b / a if a > 0 else 0
-    except:
+    old_range = max(older_highs) - min(older_lows)
+    new_range = max(recent_highs) - min(recent_lows)
+
+    if new_range == 0:
         return 0
+
+    ratio = old_range / new_range
+
+    return min(ratio if ratio > 1.5 else 0, 5)
+
+# =========================================================
+# 3. REAL LIQUIDITY SWEEP (FIXED)
+# =========================================================
+
+def liquidity_sweep(ex, s):
+    c = candles(ex, s, "5m", 10)
+    if not c:
+        return 0
+
+    prev_highs = [f(x[2]) for x in c[:-1]]
+    prev_lows = [f(x[3]) for x in c[:-1]]
+
+    last = c[-1]
+    o, h, l, cl = f(last[1]), f(last[2]), f(last[3]), f(last[4])
+
+    # sweep above previous high + rejection
+    if h > max(prev_highs) and cl < h:
+        return 1
+
+    # sweep below previous low + rejection
+    if l < min(prev_lows) and cl > l:
+        return 1
+
+    return 0
+
+# =========================================================
+# 4. BREAKOUT CONFIRMATION (FIXED)
+# =========================================================
+
+def breakout(ex, s):
+    c = candles(ex, s, "5m", 20)
+    if not c:
+        return 0
+
+    closes = [f(x[4]) for x in c]
+    highs = [f(x[2]) for x in c]
+    vols = [f(x[5]) for x in c]
+
+    resistance = max(highs[-15:-1])
+
+    vol_ok = vols[-1] > sum(vols[-6:-1]) / 5
+
+    if closes[-1] > resistance and vol_ok:
+        return 2
+
+    return 0
+
+# =========================================================
+# 5. VOLUME EXPANSION
+# =========================================================
+
+def volume_expansion(ex, s):
+    c = candles(ex, s, "5m", 15)
+    if not c:
+        return 0
+
+    vols = [f(x[5]) for x in c]
+
+    avg = sum(vols[:-1]) / max(len(vols[:-1]), 1)
+    if avg == 0:
+        return 0
+
+    spike = vols[-1] / avg
+
+    return min(max(spike, 0), 8)
+
+# =========================================================
+# 6. OI (SMOOTHED)
+# =========================================================
 
 def oi_change(ex, s, state):
+    if ex.id != "binance":
+        return 0
+
     try:
         data = ex.fetch_open_interest(s)
         val = f(data.get("openInterest") or data.get("openInterestAmount"))
 
         key = f"{ex.id}:{s}"
-        old = state.get(key, 0)
+        old = state.get(key, val)
+
         state[key] = val
 
         if old == 0:
             return 0
 
         return ((val - old) / old) * 100
+
     except:
         return 0
 
 # =========================================================
-# MTF
+# SCORE + EXPLANATION ENGINE
 # =========================================================
 
-def mtf_score(ex, s):
-    try:
-        c = ex.fetch_ohlcv(s, "15m", limit=20)
-        closes = [f(x[4]) for x in c]
-        if len(closes) < 10:
-            return 0
+def score_and_explain(reg, comp, brk, vol, sweep, oi):
 
-        score = 0
-        if closes[-1] > max(closes[-10:]):
-            score += 10
-        if closes[-1] > closes[-5]:
-            score += 10
+    score = 0
+    reasons = []
 
-        return score
-    except:
-        return 0
+    if reg in ["compression", "trend_up"]:
+        score += 10
+        reasons.append("Favorable market regime")
 
-# =========================================================
-# SCORE
-# =========================================================
+    if comp > 0:
+        score += comp * 15
+        reasons.append("Structure compression detected")
 
-def score(vs, ac, ob, oi, mtf):
+    if brk > 0:
+        score += 30
+        reasons.append("Breakout confirmed")
 
-    s = 0
+    if vol > 2:
+        score += vol * 8
+        reasons.append("Volume expansion")
 
-    if vs > 3:
-        s += 20
-    if ac > 5:
-        s += 20
-    if ob > 1.5:
-        s += 15
-    if oi > 10:
-        s += 20
+    if sweep:
+        score += 20
+        reasons.append("Liquidity sweep (stop hunt)")
 
-    s += mtf
+    if oi > 5:
+        score += 10
+        reasons.append("OI expansion (speculative flow)")
 
-    # HARD CAP (IMPORTANT)
-    return min(s, 100)
+    score = min(score, 100)
+
+    return score, reasons
 
 # =========================================================
 # MAIN LOOP
@@ -173,11 +281,11 @@ def run():
 
     state = {}
 
-    tg("BOT STARTED FIXED VERSION")
+    tg("🚀 ALPHA ENGINE V7 STARTED")
 
     while True:
 
-        exs = get_exchanges()
+        exs = exchanges()
 
         for name, ex in exs.items():
 
@@ -185,116 +293,81 @@ def run():
 
                 print(f"\nScanning {name}")
 
-                # =================================================
-                # FIX 1: SAFE LOAD MARKETS
-                # =================================================
-
                 try:
                     ex.load_markets()
                 except:
                     pass
 
                 tickers = ex.fetch_tickers()
-
-                print(f"{name} raw tickers: {len(tickers)}")
-
                 if not tickers:
-                    print(f"{name} EMPTY")
                     continue
-
-                # =================================================
-                # FIX 2: BUILD FULL UNIVERSE FIRST (IMPORTANT)
-                # =================================================
 
                 universe = []
 
                 for s, t in tickers.items():
 
-                    vol = f(
-                        t.get("quoteVolume")
-                        or t.get("baseVolume")
-                    )
-
-                    if vol <= 0:
-                        continue
-
-                    universe.append((s, t, vol))
-
-                # =================================================
-                # FIX 3: SORT BEFORE FILTERING
-                # =================================================
-
-                universe.sort(
-                    key=lambda x: x[2],
-                    reverse=True
-                )
-
-                universe = universe[:MAX_PAIRS]
-
-                print(f"{name} universe: {len(universe)}")
-
-                scanned = 0
-                skipped = 0
-
-                for s, t, vol in universe:
-
-                    if scanned > MAX_PAIRS:
-                        break
-
-                    # =================================================
-                    # FIX 4: SYMBOL FILTER (SAFE)
-                    # =================================================
-
                     if not any(x in s for x in ["/USDT", "-USDT"]):
-                        skipped += 1
                         continue
 
                     base = s.split("/")[0]
                     if base in MAJORS:
                         continue
 
-                    scanned += 1
+                    vol = f(t.get("quoteVolume") or t.get("baseVolume"))
+                    if vol <= 0:
+                        continue
 
-                    # =================================================
-                    # METRICS
-                    # =================================================
+                    universe.append((s, vol))
 
-                    vs = vol_spike(ex, s)
-                    ac = accel(ex, s)
-                    ob = ob_ratio(ex, s)
+                universe.sort(key=lambda x: x[1], reverse=True)
+                universe = universe[:MAX_PAIRS]
+
+                for s, vol in universe:
+
+                    reg = regime(ex, s)
+
+                    comp = compression_strength(ex, s)
+                    brk = breakout(ex, s)
+                    volx = volume_expansion(ex, s)
+                    sweep = liquidity_sweep(ex, s)
                     oi = oi_change(ex, s, state)
-                    mtf = mtf_score(ex, s)
 
-                    # DEBUG
-                    print(f"{s} | vs={vs:.2f} ac={ac:.1f} oi={oi:.1f} mtf={mtf}")
+                    sc, reasons = score_and_explain(reg, comp, brk, volx, sweep, oi)
 
-                    sc = score(vs, ac, ob, oi, mtf)
+                    print(f"{s} | score={sc:.1f} | {reg}")
 
                     if sc < MIN_SCORE:
                         continue
 
+                    # =================================================
+                    # SIGNAL MESSAGE (WITH STRENGTH SUMMARY)
+                    # =================================================
+
+                    strengths = "\n".join([f"• {r}" for r in reasons])
+
                     msg = f"""
-🚨 {name} SIGNAL
+🚨 {name} ALPHA SIGNAL
 
 {s}
-Score: {sc}
+Score: {sc:.1f}
+Regime: {reg}
 
-VolSpike: {vs:.2f}x
-Accel: {ac:.1f}%
-OB: {ob:.2f}
+STRENGTHS:
+{strengths}
+
+Metrics:
+Compression: {comp:.2f}
+Breakout: {brk}
+Volume: {volx:.2f}x
+Sweep: {sweep}
 OI: {oi:.1f}%
-MTF: {mtf}
 """
 
-                    print(msg)
                     tg(msg)
-
                     time.sleep(0.3)
 
-                print(f"{name} scanned={scanned} skipped={skipped}")
-
             except Exception as e:
-                print(f"{name} error:", e)
+                print(name, "error:", e)
 
         print("SCAN COMPLETE")
         time.sleep(LOOP)
