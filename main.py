@@ -31,7 +31,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.1 FULL (BloFin + MEXC + Binance + /recap) is ALIVE!"
+    return "🚀 Crime Bot v8.1 FIXED (/recap working) is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -42,7 +42,7 @@ prev_oi = {}
 vol_history = {}
 alerted = {}
 daily_signals = []
-current_top_signals = []
+current_top_signals = []   # Fixed for /recap
 
 def load_memory():
     global prev_oi, vol_history, alerted
@@ -156,17 +156,17 @@ def daily_summary():
             daily_signals.clear()
         time.sleep(60)
 
-# Main Bot Loop
+# Main Loop
 def bot_loop():
     load_memory()
-    send_telegram("🚀 <b>Crime Bot v8.1 FULL Online</b>\nBloFin + MEXC + Binance + Deep Order Book + /recap")
+    send_telegram("🚀 <b>Crime Bot v8.1 FULL Online</b>\n/recap should work now")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
     threading.Thread(target=daily_summary, daemon=True).start()
 
     while True:
         print(f"\n🔍 Scanning at {datetime.datetime.utcnow()}")
-        current_top_signals.clear()
+        current_top_signals.clear()   # Clear and refill every scan
 
         for name, ex in exchanges.items():
             try:
@@ -174,7 +174,6 @@ def bot_loop():
                 for symbol, t in list(tickers.items())[:100]:
                     if not symbol.endswith("USDT"): continue
 
-                    # Funding
                     funding = 0
                     try:
                         fr = ex.fetch_funding_rate(symbol)
@@ -182,7 +181,6 @@ def bot_loop():
                     except:
                         pass
 
-                    # Volume Spike (5m candles)
                     vol_spike = False
                     vol_ratio = 0
                     try:
@@ -194,7 +192,6 @@ def bot_loop():
                     except:
                         pass
 
-                    # OI
                     oi_chg = 0
                     try:
                         oi = ex.fetch_open_interest(symbol)
@@ -206,10 +203,8 @@ def bot_loop():
                     except:
                         pass
 
-                    # Deep Order Book
                     ob_buy_pressure, _ = analyze_order_book(ex, symbol)
 
-                    # Long/Short Ratio (Binance)
                     ls_ratio = 1.0
                     if name == "Binance":
                         try:
