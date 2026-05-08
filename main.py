@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v9.6 is ALIVE!"
+    return "🚀 Crime Bot v10 FINAL is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -34,16 +34,18 @@ def send_telegram(text):
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v9.6 Started</b>\nScore minimum = 60")
+    send_telegram("🚀 <b>Crime Bot v10 FINAL Started</b>\nScore minimum = 60")
 
     while True:
-        print(f"🔍 Scanning at {datetime.datetime.utcnow()}")
+        print(f"\n🔍 SCAN STARTED at {datetime.datetime.utcnow()}")
 
         exchanges = {
             "BloFin": ccxt.blofin({"enableRateLimit": True}),
             "MEXC": ccxt.mexc({"enableRateLimit": True}),
             "Binance": ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
         }
+
+        alerts_fired = 0
 
         for name, ex in exchanges.items():
             try:
@@ -54,7 +56,7 @@ def bot_loop():
                     if not symbol.endswith("USDT"): 
                         continue
 
-                    volume = t.get('quoteVolume', 0)
+                    volume = t.get('quoteVolume') or 0
                     if volume < 6_000_000: 
                         continue
 
@@ -62,7 +64,7 @@ def bot_loop():
                     funding = 0
                     try:
                         fr = ex.fetch_funding_rate(symbol)
-                        funding = fr.get('fundingRate', 0)
+                        funding = fr.get('fundingRate', 0) or 0
                     except:
                         pass
 
@@ -71,10 +73,11 @@ def bot_loop():
                     vol_ratio = 0
                     try:
                         candles = ex.fetch_ohlcv(symbol, '5m', limit=6)
-                        vols = [c[5] for c in candles]
-                        avg = sum(vols[:-1]) / len(vols[:-1]) if len(vols) > 1 else 1
-                        vol_ratio = vols[-1] / avg
-                        vol_spike = vol_ratio >= 4.5
+                        vols = [c[5] for c in candles if c[5] is not None]
+                        if len(vols) > 3:
+                            avg = sum(vols[:-1]) / len(vols[:-1])
+                            vol_ratio = vols[-1] / avg if avg > 0 else 0
+                            vol_spike = vol_ratio >= 4.5
                     except:
                         pass
 
@@ -85,11 +88,13 @@ def bot_loop():
                     if volume < 50_000_000: score += 12
 
                     if score >= ALERT_MIN_SCORE:
+                        alerts_fired += 1
                         send_telegram(f"🚨 CRIME ALERT (Score: {score}) — {symbol} on {name}")
 
             except Exception as e:
                 print(f"  Error on {name}: {e}")
 
+        print(f"📊 Scan finished → Fired {alerts_fired} alerts\n")
         time.sleep(LOOP_SECONDS)
 
 if __name__ == "__main__":
