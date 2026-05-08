@@ -1,3 +1,25 @@
+# =========================================================
+# INSTITUTIONAL CRIME SCANNER v3.0
+# =========================================================
+#
+# FEATURES
+# - Binance + MEXC + BloFin
+# - Multi-timeframe alignment
+# - Compression breakout detection
+# - Funding flip detection
+# - Short squeeze detection
+# - Thin liquidity detection
+# - Volatility expansion
+# - Open interest expansion
+# - Consecutive buying detection
+# - Market regime filter
+# - Overextension protection
+# - Watchlist system
+# - Elite alert filtering
+# - Cooldown system
+#
+# =========================================================
+
 import ccxt
 import os
 import time
@@ -13,22 +35,32 @@ from flask import Flask
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+TG_ENABLED = bool(
+    TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
+)
 
 LOOP_SECONDS = 60
 
-# HARD ALERT THRESHOLD
-ALERT_MIN_SCORE = 60
+# =========================================================
+# THRESHOLDS
+# =========================================================
 
-# MINIMUM CONFLUENCE REQUIRED
+WATCHLIST_SCORE = 45
+ALERT_SCORE = 60
+ELITE_SCORE = 85
+
 MIN_CONFLUENCE = 4
 
-MIN_24H_VOLUME = 5_000_000
-MAX_24H_VOLUME = 300_000_000
-
-MAX_PAIRS_PER_EXCHANGE = 250
+MIN_VOLUME = 5_000_000
+MAX_VOLUME = 300_000_000
 
 COOLDOWN_SECONDS = 3600
+
+MAX_PAIRS = 300
+
+# =========================================================
+# MAJORS FILTER
+# =========================================================
 
 MAJOR_COINS = [
     "BTC",
@@ -39,8 +71,16 @@ MAJOR_COINS = [
     "DOGE",
     "ADA",
     "TRX",
-    "LTC",
+    "LTC"
 ]
+
+# =========================================================
+# STATE
+# =========================================================
+
+prev_oi = {}
+funding_history = {}
+last_alerts = {}
 
 # =========================================================
 # FLASK
@@ -50,11 +90,18 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "🚀 Crime Scanner Elite ONLINE"
+    return "🚀 Crime Scanner v3 ONLINE"
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    port = int(
+        os.environ.get("PORT", 8080)
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        use_reloader=False
+    )
 
 # =========================================================
 # TELEGRAM
@@ -78,10 +125,10 @@ def send_telegram(text):
             timeout=10
         )
 
-        print(f"Telegram status: {r.status_code}")
+        print(r.status_code)
 
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(e)
 
 # =========================================================
 # HELPERS
@@ -91,67 +138,90 @@ def get_volume_spike(exchange, symbol):
 
     try:
 
-        candles = exchange.fetch_ohlcv(symbol, "5m", limit=12)
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            "5m",
+            limit=12
+        )
 
         volumes = [c[5] for c in candles]
 
         current = volumes[-1]
 
-        avg = sum(volumes[:-1]) / len(volumes[:-1])
+        avg = (
+            sum(volumes[:-1]) /
+            len(volumes[:-1])
+        )
 
         if avg == 0:
             return 0
 
         return current / avg
 
-    except Exception as e:
-        print(f"Volume error {symbol}: {e}")
+    except:
         return 0
 
-def get_open_interest_change(exchange, symbol, prev_oi):
+# =========================================================
+
+def get_price_acceleration(exchange, symbol):
 
     try:
 
-        oi = exchange.fetch_open_interest(symbol)
-
-        oi_value = (
-            oi.get("openInterestAmount")
-            or oi.get("openInterest")
-            or oi.get("openInterestValue")
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            "5m",
+            limit=6
         )
 
-        if oi_value is None:
+        first = candles[0][4]
+        last = candles[-1][4]
+
+        if first == 0:
             return 0
 
-        oi_value = float(oi_value)
+        return (
+            (last - first) / first
+        ) * 100
 
-        key = f"{exchange.id}:{symbol}"
-
-        change = 0
-
-        if key in prev_oi:
-
-            old = prev_oi[key]
-
-            if old > 0:
-
-                change = (
-                    (oi_value - old) / old
-                ) * 100
-
-        prev_oi[key] = oi_value
-
-        return change
-
-    except Exception as e:
-        print(f"OI error {symbol}: {e}")
+    except:
         return 0
+
+# =========================================================
+
+def get_1h_move(exchange, symbol):
+
+    try:
+
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            "1h",
+            limit=6
+        )
+
+        first = candles[0][4]
+        last = candles[-1][4]
+
+        if first == 0:
+            return 0
+
+        return (
+            (last - first) / first
+        ) * 100
+
+    except:
+        return 0
+
+# =========================================================
 
 def get_volatility_expansion(exchange, symbol):
 
     try:
 
-        candles = exchange.fetch_ohlcv(symbol, "5m", limit=20)
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            "5m",
+            limit=20
+        )
 
         ranges = []
 
@@ -164,51 +234,87 @@ def get_volatility_expansion(exchange, symbol):
             if close == 0:
                 continue
 
-            r = ((high - low) / close) * 100
+            r = (
+                (high - low) / close
+            ) * 100
 
             ranges.append(r)
 
         if len(ranges) < 10:
             return 0
 
-        recent = sum(ranges[-5:]) / 5
+        recent = (
+            sum(ranges[-5:]) / 5
+        )
 
-        old = sum(ranges[:-5]) / len(ranges[:-5])
+        old = (
+            sum(ranges[:-5]) /
+            len(ranges[:-5])
+        )
 
         if old == 0:
             return 0
 
         return recent / old
 
-    except Exception as e:
-        print(f"Vol expansion error {symbol}: {e}")
+    except:
         return 0
 
-def get_price_acceleration(exchange, symbol):
+# =========================================================
+
+def detect_compression_breakout(exchange, symbol):
 
     try:
 
-        candles = exchange.fetch_ohlcv(symbol, "5m", limit=6)
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            "1h",
+            limit=24
+        )
 
-        first = candles[0][4]
-        last = candles[-1][4]
+        ranges = []
 
-        if first == 0:
-            return 0
+        for c in candles:
 
-        move = ((last - first) / first) * 100
+            high = c[2]
+            low = c[3]
+            close = c[4]
 
-        return move
+            if close == 0:
+                continue
 
-    except Exception as e:
-        print(f"Accel error {symbol}: {e}")
-        return 0
+            ranges.append(
+                ((high - low) / close) * 100
+            )
+
+        recent_vol = (
+            sum(ranges[-3:]) / 3
+        )
+
+        old_vol = (
+            sum(ranges[:-3]) /
+            len(ranges[:-3])
+        )
+
+        compression = old_vol < 2
+
+        breakout = recent_vol > old_vol * 1.8
+
+        return compression and breakout
+
+    except:
+        return False
+
+# =========================================================
 
 def analyze_orderbook(exchange, symbol):
 
     try:
 
-        ob = exchange.fetch_order_book(symbol, limit=20)
+        ob = exchange.fetch_order_book(
+            symbol,
+            limit=20
+        )
 
         bids = ob.get("bids", [])
         asks = ob.get("asks", [])
@@ -221,31 +327,239 @@ def analyze_orderbook(exchange, symbol):
 
         return bid_vol / ask_vol
 
-    except Exception as e:
-        print(f"OB error {symbol}: {e}")
+    except:
         return 0
+
+# =========================================================
+
+def detect_thin_liquidity(exchange, symbol):
+
+    try:
+
+        ob = exchange.fetch_order_book(
+            symbol,
+            limit=50
+        )
+
+        asks = ob.get("asks", [])
+
+        if len(asks) < 10:
+            return False
+
+        first_asks = sum(a[1] for a in asks[:10])
+
+        total_asks = sum(a[1] for a in asks)
+
+        if total_asks == 0:
+            return False
+
+        ratio = first_asks / total_asks
+
+        return ratio < 0.15
+
+    except:
+        return False
+
+# =========================================================
+
+def get_open_interest_change(
+    exchange,
+    symbol
+):
+
+    try:
+
+        oi = exchange.fetch_open_interest(
+            symbol
+        )
+
+        value = (
+            oi.get("openInterestAmount")
+            or oi.get("openInterest")
+            or oi.get("openInterestValue")
+        )
+
+        if value is None:
+            return 0
+
+        value = float(value)
+
+        key = (
+            f"{exchange.id}:{symbol}"
+        )
+
+        change = 0
+
+        if key in prev_oi:
+
+            old = prev_oi[key]
+
+            if old > 0:
+
+                change = (
+                    (value - old) / old
+                ) * 100
+
+        prev_oi[key] = value
+
+        return change
+
+    except:
+        return 0
+
+# =========================================================
 
 def get_funding(exchange, symbol):
 
     try:
 
-        fr = exchange.fetch_funding_rate(symbol)
+        fr = exchange.fetch_funding_rate(
+            symbol
+        )
 
-        return float(fr.get("fundingRate", 0))
+        funding = float(
+            fr.get("fundingRate", 0)
+        )
 
-    except Exception as e:
-        print(f"Funding error {symbol}: {e}")
+        key = (
+            f"{exchange.id}:{symbol}"
+        )
+
+        if key not in funding_history:
+            funding_history[key] = []
+
+        funding_history[key].append(
+            funding
+        )
+
+        funding_history[key] = (
+            funding_history[key][-5:]
+        )
+
+        return funding
+
+    except:
         return 0
 
 # =========================================================
-# MULTI TIMEFRAME BREAKOUT
+
+def detect_funding_flip(
+    exchange,
+    symbol
+):
+
+    key = f"{exchange.id}:{symbol}"
+
+    if key not in funding_history:
+        return False
+
+    history = funding_history[key]
+
+    if len(history) < 3:
+        return False
+
+    return (
+        history[0] < 0 and
+        history[-1] > history[0]
+    )
+
 # =========================================================
 
-def analyze_timeframe(exchange, symbol, tf):
+def detect_short_squeeze(
+    funding,
+    oi_change,
+    price_accel
+):
+
+    return (
+        funding < 0 and
+        oi_change > 10 and
+        price_accel > 4
+    )
+
+# =========================================================
+
+def detect_consecutive_buying(
+    exchange,
+    symbol
+):
 
     try:
 
-        candles = exchange.fetch_ohlcv(symbol, tf, limit=40)
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            "5m",
+            limit=5
+        )
+
+        greens = 0
+
+        increasing_volume = True
+
+        prev_volume = 0
+
+        for c in candles:
+
+            open_price = c[1]
+            close_price = c[4]
+            volume = c[5]
+
+            if close_price > open_price:
+                greens += 1
+
+            if volume < prev_volume:
+                increasing_volume = False
+
+            prev_volume = volume
+
+        return (
+            greens >= 4 and
+            increasing_volume
+        )
+
+    except:
+        return False
+
+# =========================================================
+
+def market_regime_filter(exchange):
+
+    try:
+
+        candles = exchange.fetch_ohlcv(
+            "BTC/USDT:USDT",
+            "1h",
+            limit=50
+        )
+
+        closes = [c[4] for c in candles]
+
+        current = closes[-1]
+
+        ema = (
+            sum(closes[-20:]) / 20
+        )
+
+        return current > ema
+
+    except:
+        return True
+
+# =========================================================
+
+def analyze_timeframe(
+    exchange,
+    symbol,
+    tf
+):
+
+    try:
+
+        candles = exchange.fetch_ohlcv(
+            symbol,
+            tf,
+            limit=40
+        )
 
         closes = [c[4] for c in candles]
         highs = [c[2] for c in candles]
@@ -253,73 +567,98 @@ def analyze_timeframe(exchange, symbol, tf):
 
         current_close = closes[-1]
 
-        recent_high = max(highs[-10:-1])
+        recent_high = max(
+            highs[-10:-1]
+        )
 
-        avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
+        avg_volume = (
+            sum(volumes[:-1]) /
+            len(volumes[:-1])
+        )
 
         current_volume = volumes[-1]
 
-        ema9 = sum(closes[-9:]) / 9
-
-        breakout = current_close > recent_high
-
-        above_ema = current_close > ema9
-
-        bullish_structure = (
-            closes[-1] > closes[-2] > closes[-3]
-        )
-
-        strong_volume = (
-            current_volume > avg_volume * 1.5
+        ema = (
+            sum(closes[-9:]) / 9
         )
 
         score = 0
 
-        if breakout:
+        if current_close > recent_high:
             score += 1
 
-        if above_ema:
+        if current_close > ema:
             score += 1
 
-        if bullish_structure:
+        if (
+            current_volume >
+            avg_volume * 1.5
+        ):
             score += 1
 
-        if strong_volume:
+        if (
+            closes[-1] >
+            closes[-2] >
+            closes[-3]
+        ):
             score += 1
 
         return score
 
-    except Exception as e:
-        print(f"TF error {symbol} {tf}: {e}")
+    except:
         return 0
 
-def get_mtf_alignment(exchange, symbol):
+# =========================================================
 
-    tf_data = {
-        "5m": analyze_timeframe(exchange, symbol, "5m"),
-        "15m": analyze_timeframe(exchange, symbol, "15m"),
-        "1h": analyze_timeframe(exchange, symbol, "1h"),
-        "4h": analyze_timeframe(exchange, symbol, "4h"),
+def get_mtf_alignment(
+    exchange,
+    symbol
+):
+
+    tf = {
+        "5m": analyze_timeframe(
+            exchange,
+            symbol,
+            "5m"
+        ),
+
+        "15m": analyze_timeframe(
+            exchange,
+            symbol,
+            "15m"
+        ),
+
+        "1h": analyze_timeframe(
+            exchange,
+            symbol,
+            "1h"
+        ),
+
+        "4h": analyze_timeframe(
+            exchange,
+            symbol,
+            "4h"
+        )
     }
 
     score = 0
 
-    if tf_data["5m"] >= 3:
+    if tf["5m"] >= 3:
         score += 10
 
-    if tf_data["15m"] >= 3:
+    if tf["15m"] >= 3:
         score += 20
 
-    if tf_data["1h"] >= 3:
+    if tf["1h"] >= 3:
         score += 30
 
-    if tf_data["4h"] >= 3:
+    if tf["4h"] >= 3:
         score += 40
 
-    return score, tf_data
+    return score, tf
 
 # =========================================================
-# SCORE ENGINE
+# SCORING
 # =========================================================
 
 def calculate_score(
@@ -328,42 +667,54 @@ def calculate_score(
     oi_change,
     vol_expansion,
     ob_ratio,
-    price_accel,
+    accel,
     funding,
-    mtf_score
+    mtf_score,
+    compression_breakout,
+    thin_liquidity,
+    funding_flip,
+    short_squeeze,
+    consecutive_buying
 ):
 
     score = 0
-
     reasons = []
 
     # =====================================================
-    # EXTREME VOLUME
+    # VOLUME
     # =====================================================
 
     if vol_ratio >= 5:
 
-        score += 35
-        reasons.append(f"Extreme Volume {vol_ratio:.1f}x")
+        score += 30
+        reasons.append(
+            f"Extreme Volume {vol_ratio:.1f}x"
+        )
 
-    elif vol_ratio >= 4:
+    elif vol_ratio >= 3:
 
-        score += 25
-        reasons.append(f"Strong Volume {vol_ratio:.1f}x")
+        score += 20
+        reasons.append(
+            f"Strong Volume {vol_ratio:.1f}x"
+        )
 
     # =====================================================
-    # OPEN INTEREST
+    # OI
     # =====================================================
 
     if oi_change >= 20:
 
-        score += 35
-        reasons.append(f"OI Explosion +{oi_change:.1f}%")
+        score += 30
+        reasons.append(
+            f"OI Explosion +{oi_change:.1f}%"
+        )
 
-    elif oi_change >= 12:
+    elif oi_change >= 10:
 
-        score += 25
-        reasons.append(f"Strong OI +{oi_change:.1f}%")
+        score += 20
+        reasons.append(
+            f"Strong OI +{oi_change:.1f}%"
+        )
 
     # =====================================================
     # VOLATILITY
@@ -371,36 +722,39 @@ def calculate_score(
 
     if vol_expansion >= 2:
 
-        score += 20
-        reasons.append("Volatility Expansion")
+        score += 15
+        reasons.append(
+            "Volatility Expansion"
+        )
 
     # =====================================================
     # ORDERBOOK
     # =====================================================
 
-    if ob_ratio >= 2.5:
+    if ob_ratio >= 2:
 
-        score += 20
-        reasons.append(f"Heavy Buy Wall {ob_ratio:.2f}")
-
-    elif ob_ratio >= 1.8:
-
-        score += 10
-        reasons.append(f"Buy Pressure {ob_ratio:.2f}")
+        score += 15
+        reasons.append(
+            f"Buy Pressure {ob_ratio:.2f}"
+        )
 
     # =====================================================
     # ACCELERATION
     # =====================================================
 
-    if price_accel >= 10:
+    if accel >= 8:
 
-        score += 35
-        reasons.append(f"Explosive Acceleration +{price_accel:.1f}%")
+        score += 25
+        reasons.append(
+            f"Explosive Move +{accel:.1f}%"
+        )
 
-    elif price_accel >= 6:
+    elif accel >= 4:
 
-        score += 20
-        reasons.append(f"Strong Momentum +{price_accel:.1f}%")
+        score += 15
+        reasons.append(
+            f"Momentum +{accel:.1f}%"
+        )
 
     # =====================================================
     # FUNDING
@@ -409,30 +763,90 @@ def calculate_score(
     if funding < -0.0001:
 
         score += 10
-        reasons.append("Crowded Shorts")
+        reasons.append(
+            "Crowded Shorts"
+        )
+
+    # =====================================================
+    # MTF
+    # =====================================================
+
+    score += mtf_score
+
+    if mtf_score >= 60:
+
+        reasons.append(
+            "Elite Multi-TF"
+        )
+
+    # =====================================================
+    # COMPRESSION BREAKOUT
+    # =====================================================
+
+    if compression_breakout:
+
+        score += 20
+        reasons.append(
+            "Compression Breakout"
+        )
+
+    # =====================================================
+    # THIN LIQUIDITY
+    # =====================================================
+
+    if thin_liquidity:
+
+        score += 15
+        reasons.append(
+            "Thin Liquidity Above"
+        )
+
+    # =====================================================
+    # FUNDING FLIP
+    # =====================================================
+
+    if funding_flip:
+
+        score += 15
+        reasons.append(
+            "Funding Flip"
+        )
+
+    # =====================================================
+    # SHORT SQUEEZE
+    # =====================================================
+
+    if short_squeeze:
+
+        score += 20
+        reasons.append(
+            "Short Squeeze Setup"
+        )
+
+    # =====================================================
+    # BUYING STACK
+    # =====================================================
+
+    if consecutive_buying:
+
+        score += 15
+        reasons.append(
+            "Aggressive Buying"
+        )
 
     # =====================================================
     # MIDCAP BONUS
     # =====================================================
 
-    if 5_000_000 <= volume <= 80_000_000:
+    if (
+        5_000_000 <= volume <=
+        80_000_000
+    ):
 
         score += 10
-        reasons.append("Midcap Profile")
-
-    # =====================================================
-    # MULTI TF
-    # =====================================================
-
-    score += mtf_score
-
-    if mtf_score >= 70:
-
-        reasons.append("Elite Multi-TF Alignment")
-
-    elif mtf_score >= 40:
-
-        reasons.append("Strong Multi-TF Alignment")
+        reasons.append(
+            "Midcap Profile"
+        )
 
     return score, reasons
 
@@ -442,24 +856,16 @@ def calculate_score(
 
 def bot_loop():
 
-    prev_oi = {}
-
-    last_alerts = {}
-
     send_telegram(
-        f"🚀 <b>Crime Scanner Elite Started</b>\n"
-        f"Threshold = {ALERT_MIN_SCORE}"
+        "🚀 Crime Scanner v3 Started"
     )
 
     while True:
 
         print(
-            f"\n==============================\n"
-            f"SCAN STARTED {datetime.datetime.utcnow()}\n"
-            f"=============================="
+            f"\nSCAN STARTED "
+            f"{datetime.datetime.utcnow()}"
         )
-
-        alerts = 0
 
         exchanges = {
 
@@ -486,7 +892,19 @@ def bot_loop():
 
             try:
 
-                print(f"\n🔍 Scanning {name}")
+                bullish_market = (
+                    market_regime_filter(
+                        exchange
+                    )
+                )
+
+                if not bullish_market:
+
+                    print(
+                        "Bad market regime"
+                    )
+
+                    continue
 
                 markets = exchange.load_markets()
 
@@ -494,7 +912,12 @@ def bot_loop():
 
                 sorted_tickers = sorted(
                     tickers.items(),
-                    key=lambda x: x[1].get("quoteVolume", 0),
+                    key=lambda x: (
+                        x[1].get(
+                            "quoteVolume",
+                            0
+                        )
+                    ),
                     reverse=True
                 )
 
@@ -504,7 +927,7 @@ def bot_loop():
 
                     try:
 
-                        if scanned >= MAX_PAIRS_PER_EXCHANGE:
+                        if scanned >= MAX_PAIRS:
                             break
 
                         if "USDT" not in symbol:
@@ -521,167 +944,256 @@ def bot_loop():
                         ):
                             continue
 
-                        base = symbol.split("/")[0]
+                        base = (
+                            symbol.split("/")[0]
+                        )
 
                         if base in MAJOR_COINS:
                             continue
 
-                        volume = ticker.get("quoteVolume", 0)
+                        volume = ticker.get(
+                            "quoteVolume",
+                            0
+                        )
 
                         if volume is None:
                             continue
 
                         volume = float(volume)
 
-                        if volume < MIN_24H_VOLUME:
-                            continue
-
-                        if volume > MAX_24H_VOLUME:
+                        if (
+                            volume < MIN_VOLUME
+                            or
+                            volume > MAX_VOLUME
+                        ):
                             continue
 
                         scanned += 1
 
-                        cooldown_key = f"{name}:{symbol}"
+                        key = (
+                            f"{name}:{symbol}"
+                        )
 
                         now = time.time()
 
-                        if cooldown_key in last_alerts:
+                        if key in last_alerts:
 
                             if (
-                                now - last_alerts[cooldown_key]
-                                < COOLDOWN_SECONDS
+                                now -
+                                last_alerts[key]
+                                <
+                                COOLDOWN_SECONDS
                             ):
                                 continue
 
-                        # =================================================
-                        # SIGNALS
-                        # =================================================
+                        # =====================
+                        # METRICS
+                        # =====================
 
-                        vol_ratio = get_volume_spike(
-                            exchange,
-                            symbol
+                        vol_ratio = (
+                            get_volume_spike(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        oi_change = get_open_interest_change(
-                            exchange,
-                            symbol,
-                            prev_oi
+                        oi_change = (
+                            get_open_interest_change(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        vol_expansion = get_volatility_expansion(
-                            exchange,
-                            symbol
+                        vol_expansion = (
+                            get_volatility_expansion(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        ob_ratio = analyze_orderbook(
-                            exchange,
-                            symbol
+                        ob_ratio = (
+                            analyze_orderbook(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        price_accel = get_price_acceleration(
-                            exchange,
-                            symbol
+                        accel = (
+                            get_price_acceleration(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        funding = get_funding(
-                            exchange,
-                            symbol
+                        funding = (
+                            get_funding(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        mtf_score, tf_data = get_mtf_alignment(
-                            exchange,
-                            symbol
+                        mtf_score, tf = (
+                            get_mtf_alignment(
+                                exchange,
+                                symbol
+                            )
                         )
 
-                        # =================================================
+                        compression_breakout = (
+                            detect_compression_breakout(
+                                exchange,
+                                symbol
+                            )
+                        )
+
+                        thin_liquidity = (
+                            detect_thin_liquidity(
+                                exchange,
+                                symbol
+                            )
+                        )
+
+                        funding_flip = (
+                            detect_funding_flip(
+                                exchange,
+                                symbol
+                            )
+                        )
+
+                        short_squeeze = (
+                            detect_short_squeeze(
+                                funding,
+                                oi_change,
+                                accel
+                            )
+                        )
+
+                        consecutive_buying = (
+                            detect_consecutive_buying(
+                                exchange,
+                                symbol
+                            )
+                        )
+
+                        move_1h = (
+                            get_1h_move(
+                                exchange,
+                                symbol
+                            )
+                        )
+
+                        # =====================
+                        # EARLY STAGE FILTER
+                        # =====================
+
+                        if move_1h > 18:
+                            continue
+
+                        # =====================
                         # CONFLUENCE
-                        # =================================================
+                        # =====================
 
                         confluence = 0
 
-                        if vol_ratio >= 4:
+                        if vol_ratio > 3:
                             confluence += 1
 
-                        if oi_change >= 10:
+                        if oi_change > 10:
                             confluence += 1
 
-                        if vol_expansion >= 1.5:
+                        if vol_expansion > 1.5:
                             confluence += 1
 
-                        if ob_ratio >= 1.8:
+                        if ob_ratio > 1.5:
                             confluence += 1
 
-                        if price_accel >= 5:
+                        if accel > 4:
                             confluence += 1
 
-                        if mtf_score >= 40:
+                        if mtf_score > 30:
+                            confluence += 1
+
+                        if compression_breakout:
+                            confluence += 1
+
+                        if short_squeeze:
                             confluence += 1
 
                         if confluence < MIN_CONFLUENCE:
                             continue
 
-                        # =================================================
+                        # =====================
                         # SCORE
-                        # =================================================
+                        # =====================
 
-                        score, reasons = calculate_score(
-                            volume,
-                            vol_ratio,
-                            oi_change,
-                            vol_expansion,
-                            ob_ratio,
-                            price_accel,
-                            funding,
-                            mtf_score
+                        score, reasons = (
+                            calculate_score(
+                                volume,
+                                vol_ratio,
+                                oi_change,
+                                vol_expansion,
+                                ob_ratio,
+                                accel,
+                                funding,
+                                mtf_score,
+                                compression_breakout,
+                                thin_liquidity,
+                                funding_flip,
+                                short_squeeze,
+                                consecutive_buying
+                            )
                         )
 
-                        # =================================================
-                        # HARD THRESHOLD
-                        # =================================================
+                        # =====================
+                        # WATCHLIST
+                        # =====================
 
-                        if score < ALERT_MIN_SCORE:
+                        tier = None
+
+                        if score >= ELITE_SCORE:
+                            tier = "ELITE"
+
+                        elif score >= ALERT_SCORE:
+                            tier = "ALERT"
+
+                        elif score >= WATCHLIST_SCORE:
+                            tier = "WATCHLIST"
+
+                        if tier is None:
                             continue
 
-                        # =================================================
-                        # ALERT
-                        # =================================================
+                        last_alerts[key] = now
 
-                        alerts += 1
-
-                        last_alerts[cooldown_key] = now
-
-                        tf_text = (
-                            f"5m={tf_data['5m']} | "
-                            f"15m={tf_data['15m']} | "
-                            f"1h={tf_data['1h']} | "
-                            f"4h={tf_data['4h']}"
-                        )
-
-                        reason_text = "\n".join(
-                            [f"• {r}" for r in reasons]
+                        reasons_text = "\n".join(
+                            [
+                                f"• {r}"
+                                for r in reasons
+                            ]
                         )
 
                         msg = f"""
-🚨 <b>CRIME SETUP DETECTED</b>
+🚨 <b>{tier} CRIME SIGNAL</b>
 
 🔥 <b>{symbol}</b>
 🏦 {name}
 
-📊 24h Volume: ${volume/1e6:.1f}M
+🎯 Score: <b>{score}</b>
 
-⚡ Volume Spike: {vol_ratio:.2f}x
-📦 OI Change: {oi_change:.2f}%
-📈 Volatility Expansion: {vol_expansion:.2f}
-📚 Orderbook Ratio: {ob_ratio:.2f}
-🚀 Price Acceleration: {price_accel:.2f}%
+📊 Volume: ${volume/1e6:.1f}M
+⚡ Vol Spike: {vol_ratio:.2f}x
+📦 OI: {oi_change:.2f}%
+📈 Vol Expansion: {vol_expansion:.2f}
+📚 OB Ratio: {ob_ratio:.2f}
+🚀 Acceleration: {accel:.2f}%
 💸 Funding: {funding*100:.4f}%
 
-🧠 Multi-Timeframe:
-{tf_text}
+🧠 MTF:
+5m={tf['5m']}
+15m={tf['15m']}
+1h={tf['1h']}
+4h={tf['4h']}
 
-🎯 <b>SCORE: {score}/100</b>
-
-{reason_text}
+{reasons_text}
 """
 
                         print(msg)
@@ -691,14 +1203,17 @@ def bot_loop():
                         time.sleep(1)
 
                     except Exception as e:
-                        print(f"Pair error {symbol}: {e}")
+                        print(
+                            f"Pair error "
+                            f"{symbol}: {e}"
+                        )
 
             except Exception as e:
-                print(f"{name} error: {e}")
+                print(
+                    f"{name} error: {e}"
+                )
 
-        print(
-            f"\n✅ Scan completed | Alerts: {alerts}"
-        )
+        print("Scan complete")
 
         time.sleep(LOOP_SECONDS)
 
