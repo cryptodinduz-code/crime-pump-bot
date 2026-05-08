@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v10 FINAL is ALIVE!"
+    return "🚀 Crime Bot v10.5 - Quality Mode"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -32,17 +32,28 @@ def send_telegram(text):
     except:
         pass
 
+def analyze_order_book(exchange, symbol):
+    try:
+        ob = exchange.fetch_order_book(symbol, limit=15)
+        bid_vol = sum(lvl[1] for lvl in ob.get("bids", []))
+        ask_vol = sum(lvl[1] for lvl in ob.get("asks", []))
+        if ask_vol == 0:
+            return False
+        ratio = bid_vol / ask_vol
+        return ratio > 1.75   # Strong buy pressure
+    except:
+        return False
+
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v10 FINAL Started</b>\nScore minimum = 60")
+    send_telegram("🚀 <b>Crime Bot v10.5 Started</b>\nScore = 60 | Binance removed + Order Book filter")
 
     while True:
         print(f"\n🔍 SCAN STARTED at {datetime.datetime.utcnow()}")
 
         exchanges = {
             "BloFin": ccxt.blofin({"enableRateLimit": True}),
-            "MEXC": ccxt.mexc({"enableRateLimit": True}),
-            "Binance": ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+            "MEXC": ccxt.mexc({"enableRateLimit": True})
         }
 
         alerts_fired = 0
@@ -52,7 +63,7 @@ def bot_loop():
                 tickers = ex.fetch_tickers()
                 print(f"  → {name}: Loaded {len(tickers)} tickers")
 
-                for symbol, t in list(tickers.items())[:120]:
+                for symbol, t in list(tickers.items())[:150]:
                     if not symbol.endswith("USDT"): 
                         continue
 
@@ -81,15 +92,25 @@ def bot_loop():
                     except:
                         pass
 
+                    # New Filter: Order Book Buy Pressure
+                    buy_pressure = analyze_order_book(ex, symbol)
+
                     # Score
                     score = 0
                     if abs(funding) > 0.0003: score += 32
                     if vol_spike: score += 28
+                    if buy_pressure: score += 20
                     if volume < 50_000_000: score += 12
 
                     if score >= ALERT_MIN_SCORE:
                         alerts_fired += 1
-                        send_telegram(f"🚨 CRIME ALERT (Score: {score}) — {symbol} on {name}")
+                        send_telegram(f"""🚨 <b>CRIME ALERT</b> (Score: {score}/100)
+🔥 {symbol} on {name}
+
+💰 Volume: ${volume/1_000_000:.1f}M
+📈 Funding: {funding*100:+.4f}%
+⚡ Volume Spike: {vol_ratio:.1f}x
+📊 Buy Pressure: {'STRONG' if buy_pressure else 'Normal'}""")
 
             except Exception as e:
                 print(f"  Error on {name}: {e}")
