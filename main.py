@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v10.6 - Order Book + Lower Volume"
+    return "🚀 Crime Bot v10.6 - Volume Spike 2x"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -40,13 +40,13 @@ def analyze_order_book(exchange, symbol):
         if ask_vol == 0:
             return False
         ratio = bid_vol / ask_vol
-        return ratio > 1.75   # Strong buy pressure
+        return ratio > 1.75
     except:
         return False
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v10.6 Started</b>\nOrder Book Added + Volume lowered to 4M")
+    send_telegram("🚀 <b>Crime Bot v10.6 Started</b>\nVolume Spike lowered to 2.0x")
 
     while True:
         print(f"\n🔍 SCAN STARTED at {datetime.datetime.utcnow()}")
@@ -68,7 +68,7 @@ def bot_loop():
                         continue
 
                     volume = t.get('quoteVolume') or 0
-                    if volume < 4_000_000:          # LOWERED as you asked
+                    if volume < 4_000_000: 
                         continue
 
                     # Funding
@@ -79,7 +79,7 @@ def bot_loop():
                     except:
                         pass
 
-                    # Volume Spike
+                    # Volume Spike - LOWERED TO 2.0x as requested
                     vol_spike = False
                     vol_ratio = 0
                     try:
@@ -88,7 +88,7 @@ def bot_loop():
                         if len(vols) > 3:
                             avg = sum(vols[:-1]) / len(vols[:-1])
                             vol_ratio = vols[-1] / avg if avg > 0 else 0
-                            vol_spike = vol_ratio >= 4.5
+                            vol_spike = vol_ratio >= 2.0      # ← CHANGED
                     except:
                         pass
 
@@ -99,7 +99,7 @@ def bot_loop():
                     score = 0
                     if abs(funding) > 0.0003: score += 32
                     if vol_spike: score += 28
-                    if buy_pressure: score += 20      # New filter
+                    if buy_pressure: score += 20
                     if volume < 50_000_000: score += 12
 
                     if score >= ALERT_MIN_SCORE:
