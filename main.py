@@ -12,19 +12,21 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 60
+ALERT_MIN_SCORE = 60   # Back to 60 as you wanted
+
+# Stock filter (remove if you want stocks)
+STOCK_KEYWORDS = ["AMD", "META", "TSM", "PAYP", "EWJ", "NVDA", "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"]
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v9.1 - Clean & Debugging"
+    return "🚀 Crime Bot v9.4 FULL is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Global for recap
 current_top_signals = []
 
 def send_telegram(text):
@@ -35,14 +37,20 @@ def send_telegram(text):
     except:
         pass
 
+def get_liq_heat(exchange, symbol):
+    try:
+        candles = exchange.fetch_ohlcv(symbol, '5m', limit=12)
+        high_low = sum(c[2] - c[3] for c in candles)
+        return high_low * 0.4
+    except:
+        return 0
+
 # Main Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v9.1 Started</b>\nClean version with debug")
-
-    prev_oi = {}  # moved inside function
+    send_telegram("🚀 <b>Crime Bot v9.4 FULL Started</b>\nScore minimum = 60 | No Stocks")
 
     while True:
-        print(f"🔍 Starting scan at {datetime.datetime.utcnow()}")
+        print(f"🔍 Scanning at {datetime.datetime.utcnow()}")
         current_top_signals.clear()
 
         exchanges = {
@@ -52,49 +60,70 @@ def bot_loop():
         }
 
         for name, ex in exchanges.items():
-            print(f"  → Scanning {name}...")
             try:
                 tickers = ex.fetch_tickers()
-                print(f"    Found {len(tickers)} tickers on {name}")
-
-                for symbol, t in list(tickers.items())[:80]:
-                    if not symbol.endswith("USDT"):
+                for symbol, t in list(tickers.items())[:120]:
+                    if not symbol.endswith("USDT"): 
                         continue
 
-                    score = 45  # base
-                    signals = []
+                    # Skip stocks
+                    if any(stock in symbol.upper() for stock in STOCK_KEYWORDS):
+                        continue
+
+                    volume = t.get('quoteVolume', 0)
+                    if volume < 5_000_000: 
+                        continue
 
                     # Funding
+                    funding = 0
                     try:
                         fr = ex.fetch_funding_rate(symbol)
                         funding = fr.get('fundingRate', 0)
-                        if abs(funding) > 0.0003:
-                            score += 28
-                            signals.append("Extreme Funding")
                     except:
                         pass
 
                     # Volume Spike
+                    vol_spike = False
+                    vol_ratio = 0
                     try:
                         candles = ex.fetch_ohlcv(symbol, '5m', limit=6)
                         vols = [c[5] for c in candles]
                         avg = sum(vols[:-1]) / len(vols[:-1]) if len(vols) > 1 else 1
                         vol_ratio = vols[-1] / avg
-                        if vol_ratio >= 4.5:
-                            score += 25
-                            signals.append(f"Vol Spike {vol_ratio:.1f}x")
+                        vol_spike = vol_ratio >= 4.5
                     except:
                         pass
+
+                    # Liq Heat
+                    liq_heat = get_liq_heat(ex, symbol)
+
+                    # Score
+                    score = 0
+                    if abs(funding) > 0.0003: score += 30
+                    if vol_spike: score += 28
+                    if liq_heat > 100000: score += 18
+                    if t.get('quoteVolume', 0) < 50_000_000: score += 12
 
                     if score >= ALERT_MIN_SCORE:
                         alert = {"symbol": symbol, "exchange": name, "score": score}
                         current_top_signals.append(alert)
-                        send_telegram(f"🚨 CRIME ALERT (Score: {score}) — {symbol} on {name}")
 
-            except Exception as e:
-                print(f"    Error on {name}: {e}")
+                        send_telegram(f"""🚨 <b>CRIME ALERT</b> (Score: {score}/100)
+🔥 {symbol} on {name}
 
-        print(f"✅ Scan finished - {len(current_top_signals)} signals found")
+Price: ${t.get('last', 0):.6g}
+24h Futures Vol: ${volume/1000000:.2f}M
+Funding Rate: {funding*100:+.4f}%
+Liquidation Heat: ${liq_heat/1000000:.1f}M
+
+Early Signals:
+• Extreme Funding
+• Volume Spike {vol_ratio:.1f}x
+• Liquidation Pressure""")
+
+            except:
+                continue
+
         time.sleep(LOOP_SECONDS)
 
 if __name__ == "__main__":
