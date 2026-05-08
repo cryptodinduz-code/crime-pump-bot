@@ -15,20 +15,19 @@ TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
 MEMORY_FILE = "memory.json"
-ALERT_MIN_SCORE = 65
+ALERT_MIN_SCORE = 60
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.3 FULL is ALIVE! (All scanning + /recap)"
+    return "🚀 Crime Bot v8.3 - /recap FIXED"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Memory
-prev_oi = {}
+# Global list for /recap
 current_top_signals = []
 
 def send_telegram(text, chat_id=None):
@@ -75,7 +74,7 @@ def check_for_commands():
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v8.3 FULL Online</b>\nAll scanning restored + /recap")
+    send_telegram("🚀 <b>Crime Bot v8.3 FULL Started</b>\n/recap should now show signals")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
 
@@ -92,7 +91,7 @@ def bot_loop():
         for name, ex in exchanges.items():
             try:
                 tickers = ex.fetch_tickers()
-                for symbol, t in list(tickers.items())[:100]:
+                for symbol, t in list(tickers.items())[:120]:
                     if not symbol.endswith("USDT"): 
                         continue
 
