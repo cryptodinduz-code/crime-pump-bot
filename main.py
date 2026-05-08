@@ -15,19 +15,20 @@ TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
 MEMORY_FILE = "memory.json"
-ALERT_MIN_SCORE = 60
+ALERT_MIN_SCORE = 62
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.3 - /recap FIXED"
+    return "🚀 Crime Bot v9 FULL is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Global list for /recap
+# Memory
+prev_oi = {}
 current_top_signals = []
 
 def send_telegram(text, chat_id=None):
@@ -49,6 +50,14 @@ def analyze_order_book(exchange, symbol):
         return ratio > 1.8, round(ratio, 2)
     except:
         return False, 0
+
+def get_liq_heat(exchange, symbol):
+    try:
+        candles = exchange.fetch_ohlcv(symbol, '5m', limit=12)
+        high_low = sum(c[2] - c[3] for c in candles)
+        return high_low * 0.4  # rough liquidation proxy
+    except:
+        return 0
 
 # /recap Command
 def check_for_commands():
@@ -74,7 +83,7 @@ def check_for_commands():
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v8.3 FULL Started</b>\n/recap should now show signals")
+    send_telegram("🚀 <b>Crime Bot v9 FULL Online</b>\nAll features included")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
 
@@ -91,7 +100,7 @@ def bot_loop():
         for name, ex in exchanges.items():
             try:
                 tickers = ex.fetch_tickers()
-                for symbol, t in list(tickers.items())[:120]:
+                for symbol, t in list(tickers.items())[:100]:
                     if not symbol.endswith("USDT"): 
                         continue
 
@@ -127,8 +136,9 @@ def bot_loop():
                     except:
                         pass
 
-                    # Order Book
-                    ob_buy_pressure, _ = analyze_order_book(ex, symbol)
+                    # Order Book + Liq Heat
+                    ob_buy_pressure, ob_ratio = analyze_order_book(ex, symbol)
+                    liq_heat = get_liq_heat(ex, symbol)
 
                     # Score
                     score = 0
@@ -136,12 +146,30 @@ def bot_loop():
                     if vol_spike: score += 25
                     if oi_chg > 18: score += 22
                     if ob_buy_pressure: score += 18
+                    if liq_heat > 100000: score += 15
                     if t.get('quoteVolume', 0) < 40000000: score += 10
 
                     if score >= ALERT_MIN_SCORE:
                         alert = {"symbol": symbol, "exchange": name, "score": score}
                         current_top_signals.append(alert)
-                        send_telegram(f"🚨 CRIME ALERT (Score: {score}) — {symbol} on {name}")
+
+                        # Detailed alert like your friend's style
+                        send_telegram(f"""🚨 <b>CRIME ALERT</b> (Score: {score}/100)
+🔥 {symbol} on {name}
+
+Price: ${t.get('last', 0):.6g}
+24h Futures Vol: ${t.get('quoteVolume', 0)/1000000:.2f}M
+Funding Rate: {funding*100:+.4f}%
+Open Interest Change: {oi_chg:+.1f}%
+Liquidation Heat: ${liq_heat/1000000:.1f}M
+Order Book: {'Strong Buy Pressure' if ob_buy_pressure else 'Neutral'}
+
+Signals:
+• Extreme Funding
+• Volume Spike {vol_ratio:.1f}x
+• OI Growth
+• {'Buy Wall Detected' if ob_buy_pressure else ''}
+• {'Liquidation Pressure' if liq_heat > 100000 else ''}""")
 
             except:
                 continue
