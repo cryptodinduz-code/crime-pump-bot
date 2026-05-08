@@ -1,9 +1,11 @@
 import ccxt
 import os
 import time
+import json
 import datetime
 import threading
 import requests
+from collections import deque
 from flask import Flask
 
 # ================== CONFIG ==================
@@ -12,18 +14,21 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
+MEMORY_FILE = "memory.json"
+ALERT_MIN_SCORE = 65
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v8.3 - /recap FIXED and working"
+    return "🚀 Crime Bot v8.3 FULL is ALIVE! (All scanning + /recap)"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Global list for /recap
+# Memory
+prev_oi = {}
 current_top_signals = []
 
 def send_telegram(text, chat_id=None):
@@ -34,6 +39,17 @@ def send_telegram(text, chat_id=None):
                       json={"chat_id": target, "text": text, "parse_mode": "HTML"})
     except:
         pass
+
+def analyze_order_book(exchange, symbol):
+    try:
+        ob = exchange.fetch_order_book(symbol, limit=20)
+        bid_vol = sum(lvl[1] for lvl in ob.get("bids", []))
+        ask_vol = sum(lvl[1] for lvl in ob.get("asks", []))
+        if ask_vol == 0: return False, 0
+        ratio = bid_vol / ask_vol
+        return ratio > 1.8, round(ratio, 2)
+    except:
+        return False, 0
 
 # /recap Command
 def check_for_commands():
@@ -59,7 +75,7 @@ def check_for_commands():
 
 # Main Bot Loop
 def bot_loop():
-    send_telegram("🚀 <b>Crime Bot v8.3 Started</b>\n/recap should now work")
+    send_telegram("🚀 <b>Crime Bot v8.3 FULL Online</b>\nAll scanning restored + /recap")
 
     threading.Thread(target=check_for_commands, daemon=True).start()
 
@@ -67,7 +83,6 @@ def bot_loop():
         print(f"🔍 Scanning at {datetime.datetime.utcnow()}")
         current_top_signals.clear()
 
-        # Real scanning from all exchanges
         exchanges = {
             "BloFin": ccxt.blofin({"enableRateLimit": True}),
             "MEXC": ccxt.mexc({"enableRateLimit": True}),
@@ -78,26 +93,60 @@ def bot_loop():
             try:
                 tickers = ex.fetch_tickers()
                 for symbol, t in list(tickers.items())[:100]:
-                    if not symbol.endswith("USDT"):
+                    if not symbol.endswith("USDT"): 
                         continue
 
-                    # Simple score for now (we can make it complex later)
-                    score = 60
-                    if "SIREN" in symbol.upper() or "NEIRO" in symbol.upper() or "LAB" in symbol.upper():
-                        score = 88
+                    # Funding
+                    funding = 0
+                    try:
+                        fr = ex.fetch_funding_rate(symbol)
+                        funding = fr.get('fundingRate', 0)
+                    except:
+                        pass
 
-                    if score >= 55:
+                    # Volume Spike
+                    vol_spike = False
+                    vol_ratio = 0
+                    try:
+                        candles = ex.fetch_ohlcv(symbol, '5m', limit=6)
+                        vols = [c[5] for c in candles]
+                        avg = sum(vols[:-1]) / len(vols[:-1]) if len(vols) > 1 else 1
+                        vol_ratio = vols[-1] / avg
+                        vol_spike = vol_ratio >= 4.5
+                    except:
+                        pass
+
+                    # OI
+                    oi_chg = 0
+                    try:
+                        oi = ex.fetch_open_interest(symbol)
+                        oi_val = oi.get('openInterestAmount') or oi.get('openInterest')
+                        key = f"{name}:{symbol}"
+                        if key in prev_oi and prev_oi[key] > 0:
+                            oi_chg = ((oi_val - prev_oi[key]) / prev_oi[key]) * 100
+                        prev_oi[key] = oi_val
+                    except:
+                        pass
+
+                    # Order Book
+                    ob_buy_pressure, _ = analyze_order_book(ex, symbol)
+
+                    # Score
+                    score = 0
+                    if abs(funding) > 0.0003: score += 28
+                    if vol_spike: score += 25
+                    if oi_chg > 18: score += 22
+                    if ob_buy_pressure: score += 18
+                    if t.get('quoteVolume', 0) < 40000000: score += 10
+
+                    if score >= ALERT_MIN_SCORE:
                         alert = {"symbol": symbol, "exchange": name, "score": score}
                         current_top_signals.append(alert)
+                        send_telegram(f"🚨 CRIME ALERT (Score: {score}) — {symbol} on {name}")
 
-            except Exception as e:
-                print(f"Error on {name}: {e}")
+            except:
+                continue
 
-        # Force test signals so /recap never empty
-        current_top_signals.append({"symbol": "SIRENUSDT", "exchange": "MEXC", "score": 88})
-        current_top_signals.append({"symbol": "NEIROUSDT", "exchange": "Binance", "score": 79})
-
-        print(f"✅ {len(current_top_signals)} signals ready for /recap")
         time.sleep(LOOP_SECONDS)
 
 if __name__ == "__main__":
