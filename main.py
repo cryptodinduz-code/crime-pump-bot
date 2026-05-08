@@ -18,7 +18,7 @@ MEMORY_FILE = "memory.json"
 
 ALERT_MIN_SCORE = 68
 
-# Weights
+# Weights (updated)
 W_FUNDING = 28
 W_VOL_SPIKE = 25
 W_OI_SURGE = 22
@@ -26,12 +26,13 @@ W_LIQ_HEAT = 20
 W_LS_RATIO = 18
 W_FS_RATIO = 12
 W_LOW_CAP = 10
+W_ORDER_BOOK = 18   # New deeper order book weight
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Crime Bot v7 (Liq Heat + L/S Ratio + Daily Summary) is ALIVE!"
+    return "🚀 Crime Bot v8 (Deep Order Book Analysis) is ALIVE!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -57,11 +58,7 @@ def load_memory():
 
 def save_memory():
     try:
-        data = {
-            "prev_oi": prev_oi,
-            "vol_history": {k: list(v) for k, v in vol_history.items()},
-            "alerted": alerted
-        }
+        data = {"prev_oi": prev_oi, "vol_history": {k: list(v) for k, v in vol_history.items()}, "alerted": alerted}
         with open(MEMORY_FILE, "w") as f:
             json.dump(data, f)
     except:
@@ -82,7 +79,20 @@ def send_telegram(text):
     except:
         pass
 
-def calculate_score(data):
+def analyze_order_book(exchange, symbol):
+    """Deeper order book analysis - returns True if strong buy pressure"""
+    try:
+        ob = exchange.fetch_order_book(symbol, limit=20)
+        bid_vol = sum(lvl[1] for lvl in ob.get("bids", []))
+        ask_vol = sum(lvl[1] for lvl in ob.get("asks", []))
+        if ask_vol == 0:
+            return False, 0
+        ratio = bid_vol / ask_vol
+        return ratio > 1.8, round(ratio, 2)  # strong buy pressure if bids > 1.8x asks
+    except:
+        return False, 0
+
+def calculate_score(data, ob_buy_pressure=False):
     score = 0
     signals = []
 
@@ -102,7 +112,7 @@ def calculate_score(data):
         score += W_LIQ_HEAT
         signals.append(f"Liquidation Heat ${data['liq_heat']/1000000:.1f}M")
 
-    if data.get('ls_ratio', 0) > 1.8:   # heavy long bias
+    if data.get('ls_ratio', 0) > 1.8:
         score += W_LS_RATIO
         signals.append(f"Long/Short Ratio {data['ls_ratio']:.1f}")
 
@@ -114,26 +124,29 @@ def calculate_score(data):
         score += W_LOW_CAP
         signals.append("Low Cap")
 
+    if ob_buy_pressure:
+        score += W_ORDER_BOOK
+        signals.append("Deep Order Book: Strong Buy Pressure")
+
     return min(100, score), signals
 
-# Daily Summary (runs once per day)
+# Daily Summary
 def daily_summary():
     while True:
         now = datetime.datetime.utcnow()
-        if now.hour == 0 and now.minute < 5:
-            if daily_signals:
-                top = sorted(daily_signals, key=lambda x: x['score'], reverse=True)[:5]
-                msg = "📊 <b>Daily Crime Summary</b>\n\n"
-                for s in top:
-                    msg += f"• {s['symbol']} on {s['exchange']} — Score {s['score']}\n"
-                send_telegram(msg)
-                daily_signals.clear()
+        if now.hour == 0 and now.minute < 5 and daily_signals:
+            top = sorted(daily_signals, key=lambda x: x['score'], reverse=True)[:5]
+            msg = "📊 <b>Daily Crime Summary (v8)</b>\n\n"
+            for s in top:
+                msg += f"• {s['symbol']} on {s['exchange']} — Score {s['score']}\n"
+            send_telegram(msg)
+            daily_signals.clear()
         time.sleep(60)
 
-# Main Bot Loop
+# Main Loop
 def bot_loop():
     load_memory()
-    send_telegram("🚀 <b>Crime Bot v7 Online</b>\nLiquidation Heat + L/S Ratio + Daily Summary")
+    send_telegram("🚀 <b>Crime Bot v8 Online</b>\nDeep Order Book Analysis Added")
 
     threading.Thread(target=daily_summary, daemon=True).start()
 
@@ -145,7 +158,7 @@ def bot_loop():
                 for symbol, t in list(tickers.items())[:80]:
                     if not symbol.endswith("USDT"): continue
 
-                    # Core data (same as before)
+                    # Basic data (funding, volume, OI, etc.)
                     funding = 0
                     try:
                         fr = ex.fetch_funding_rate(symbol)
@@ -153,7 +166,6 @@ def bot_loop():
                     except:
                         pass
 
-                    # Volume spike
                     vol_spike = False
                     vol_ratio = 0
                     try:
@@ -165,7 +177,6 @@ def bot_loop():
                     except:
                         pass
 
-                    # OI
                     oi_chg = 0
                     try:
                         oi = ex.fetch_open_interest(symbol)
@@ -177,35 +188,29 @@ def bot_loop():
                     except:
                         pass
 
-                    # Simple liquidation estimate + L/S (Binance)
-                    liq_heat = 0
-                    ls_ratio = 1.0
-                    if name == "Binance":
-                        try:
-                            # Long/Short Ratio
-                            ls = ex.fetch_long_short_ratio(symbol, limit=1)
-                            ls_ratio = ls[0]['longShortRatio'] if ls else 1.0
-                        except:
-                            pass
+                    # Deeper Order Book Analysis (only on promising symbols)
+                    ob_buy_pressure = False
+                    if abs(funding) > 0.0002 or vol_spike:  # only check when already strong
+                        ob_buy_pressure, _ = analyze_order_book(ex, symbol)
 
                     data = {
                         "funding": funding,
                         "vol_spike": vol_spike,
                         "vol_ratio": vol_ratio,
                         "oi_chg": oi_chg,
-                        "fs_ratio": 3.0,  # placeholder
+                        "fs_ratio": 3.0,
                         "futures_vol": t.get('quoteVolume', 0),
-                        "liq_heat": liq_heat,
-                        "ls_ratio": ls_ratio
+                        "liq_heat": 0,
+                        "ls_ratio": 1.0
                     }
 
-                    score, signals = calculate_score(data)
+                    score, signals = calculate_score(data, ob_buy_pressure)
 
                     if score >= ALERT_MIN_SCORE:
                         alert = {"symbol": symbol, "exchange": name, "score": score}
                         daily_signals.append(alert)
                         send_telegram(
-                            f"🚨 <b>CRIME ALERT v7</b> (Score: {score})\n"
+                            f"🚨 <b>CRIME ALERT v8</b> (Score: {score})\n"
                             f"🔥 {symbol} on {name}\n"
                             + "\n".join(signals)
                         )
