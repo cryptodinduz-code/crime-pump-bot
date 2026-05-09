@@ -27,7 +27,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "CRIME ENGINE V12"
+    return "CRIME ENGINE V12.1 FIXED"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
@@ -77,24 +77,9 @@ def exchanges():
 def candles(ex, s, tf="5m", n=30):
     try:
         c = ex.fetch_ohlcv(s, tf, limit=n)
-        return c if len(c) > 15 else None
+        return c if c and len(c) > 15 else None
     except:
         return None
-
-# =========================================================
-# VOLATILITY NORMALIZER (IMPORTANT FIX)
-# =========================================================
-
-def vol_norm(c):
-    highs = [f(x[2]) for x in c]
-    lows = [f(x[3]) for x in c]
-
-    price = f(c[-1][4])
-    if price == 0:
-        return 1
-
-    range_ = max(highs) - min(lows)
-    return range_ / price
 
 # =========================================================
 # REGIME
@@ -108,10 +93,11 @@ def regime(ex, s):
     closes = [f(x[4]) for x in c]
 
     trend = closes[-1] > closes[-5] > closes[-10]
+
     return 0.65 if trend else 0.35
 
 # =========================================================
-# COMPRESSION (DE-BIASED)
+# COMPRESSION
 # =========================================================
 
 def compression(ex, s):
@@ -122,18 +108,18 @@ def compression(ex, s):
     highs = [f(x[2]) for x in c]
     lows = [f(x[3]) for x in c]
 
-    old = max(highs[:15]) - min(lows[:15])
-    new = max(highs[-15:]) - min(lows[-15:])
+    old_range = max(highs[:15]) - min(lows[:15])
+    new_range = max(highs[-15:]) - min(lows[-15:])
 
-    if new <= 0:
+    if new_range <= 0:
         return 0
 
-    ratio = old / new
+    ratio = old_range / new_range
 
     return min((ratio - 1) / 4, 1)
 
 # =========================================================
-# BREAKOUT (CONFIRMED, NOT ASSUMED)
+# BREAKOUT
 # =========================================================
 
 def breakout(ex, s):
@@ -143,21 +129,16 @@ def breakout(ex, s):
 
     closes = [f(x[4]) for x in c]
     highs = [f(x[2]) for x in c]
-    vols = [f(x[5]) for x in c]
 
     resistance = max(highs[-12:-2])
 
     broke = closes[-1] > resistance
-    follow_through = closes[-1] > closes[-2]
-    vol_ok = vols[-1] > (sum(vols[-6:-1]) / 5)
+    follow = closes[-1] > closes[-2]
 
-    if broke and follow_through and vol_ok:
-        return 0.85
-
-    return 0
+    return 0.85 if (broke and follow) else 0
 
 # =========================================================
-# VOLUME (CONDITIONAL IMPORTANCE)
+# VOLUME
 # =========================================================
 
 def volume(ex, s, breakout_active):
@@ -175,14 +156,13 @@ def volume(ex, s, breakout_active):
 
     base = min((spike - 1) / 5, 1)
 
-    # reduce importance if breakout already exists (fix double count)
     if breakout_active:
         base *= 0.6
 
     return base
 
 # =========================================================
-# LIQUIDITY SWEEP (CONTEXTUAL)
+# SWEEP
 # =========================================================
 
 def sweep(ex, s):
@@ -196,30 +176,26 @@ def sweep(ex, s):
     last = c[-1]
     h, l, cl = f(last[2]), f(last[3]), f(last[4])
 
-    sweep_up = h > max(highs) and cl < h
-    sweep_down = l < min(lows) and cl > l
+    if h > max(highs) or l < min(lows):
+        return 1
 
-    return 1 if (sweep_up or sweep_down) else 0
+    return 0
 
 # =========================================================
-# FINAL SCORE (CALIBRATED MODEL)
+# SCORE (FIXED SYNTAX)
 # =========================================================
 
-def score(reg, comp, brk, vol, swp, vol_norm_factor):
+def score(reg, comp, brk, vol, swp):
 
-    # volatility adjustment (IMPORTANT FIX)
-    vol_factor = 1 / (1 + vol_norm_factor * 10)
-
-    raw =
+    raw = (
         comp * 0.22 +
         brk * 0.32 +
         vol * 0.20 +
         swp * 0.16 +
         reg * 0.10
+    )
 
-    adjusted = raw * vol_factor
-
-    return max(1, min(adjusted * 100, 100))
+    return max(1, min(raw * 100, 100))
 
 # =========================================================
 # MAIN LOOP
@@ -227,7 +203,7 @@ def score(reg, comp, brk, vol, swp, vol_norm_factor):
 
 def run():
 
-    tg("🚀 CRIME ENGINE V12 LIVE")
+    tg("🚀 CRIME ENGINE V12.1 FIXED LIVE")
 
     while True:
 
@@ -270,20 +246,13 @@ def run():
 
                 for s, vol in universe:
 
-                    c = candles(ex, s)
-                    if not c:
-                        continue
-
-                    vnorm = vol_norm(c)
-
                     reg = regime(ex, s)
                     comp = compression(ex, s)
-
                     brk = breakout(ex, s)
                     volx = volume(ex, s, brk > 0)
                     swp = sweep(ex, s)
 
-                    sc = score(reg, comp, brk, volx, swp, vnorm)
+                    sc = score(reg, comp, brk, volx, swp)
 
                     print(f"{s} | crime={sc:.1f}")
 
@@ -291,7 +260,7 @@ def run():
                         continue
 
                     msg = f"""
-🚨 CRIME SIGNAL V12
+🚨 CRIME SIGNAL V12.1
 
 {s}
 Crime Score: {sc:.1f}/100
