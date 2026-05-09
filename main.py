@@ -19,7 +19,7 @@ TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 LOOP_SECONDS = 60
 ALERT_MIN_SCORE = 60
 
-MAX_PAIRS_PER_EXCHANGE = 250
+MAX_PAIRS_PER_EXCHANGE = 400   # ← Increased as requested
 
 MIN_VOLUME = 2_000_000
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
@@ -27,6 +27,9 @@ LOW_VOLUME_BONUS_LIMIT = 30_000_000
 # STOCK FILTER
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
                   "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK"]
+
+# MAJOR PAIRS FILTER (skip big stable ones, but keep the ones you want)
+MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
 
 
 # =========================================================
@@ -181,32 +184,31 @@ def get_funding(exchange, symbol):
 
 
 # =========================================================
-# SCORING ENGINE - BALANCED
+# SCORING ENGINE
 # =========================================================
 
 def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
     score = 0
     reasons = []
 
-    # More balanced scoring
-    if abs(funding) > 0.00025:
-        score += 25
-        reasons.append("Extreme Funding")
+    if abs(funding) > 0.00015:
+        score += 20
+        reasons.append("Funding Extreme")
 
-    if vol_ratio > 2.5:
-        score += 28
+    if vol_ratio > 2:
+        score += 25
         reasons.append(f"Volume Spike {vol_ratio:.1f}x")
 
-    if oi_change > 8:
-        score += 18
+    if oi_change > 5:
+        score += 20
         reasons.append(f"OI +{oi_change:.1f}%")
 
-    if ob_ratio > 1.6:
-        score += 18
+    if ob_ratio > 1.4:
+        score += 15
         reasons.append(f"Buy Pressure {ob_ratio:.2f}")
 
-    if liq_heat > 1000:
-        score += 12
+    if liq_heat > 500:
+        score += 10
         reasons.append("Liquidation Pressure")
 
     if volume < LOW_VOLUME_BONUS_LIMIT:
@@ -223,7 +225,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 def bot_loop():
     send_telegram(
         "🚀 <b>Alpha Hunter Bot Started</b>\n"
-        f"Minimum score: {ALERT_MIN_SCORE} | Balanced Scoring + Stock Filter"
+        f"Minimum score: {ALERT_MIN_SCORE} | Stock + Major Pairs filter active"
     )
 
     prev_oi = {}
@@ -268,8 +270,11 @@ def bot_loop():
                         if "USDT" not in symbol:
                             continue
 
-                        # STOCK FILTER
-                        if any(keyword in symbol.upper() for keyword in STOCK_KEYWORDS):
+                        # === STOCK + MAJOR PAIRS FILTER ===
+                        upper_symbol = symbol.upper()
+                        if any(keyword in upper_symbol for keyword in STOCK_KEYWORDS):
+                            continue
+                        if any(major in upper_symbol for major in MAJOR_PAIRS):
                             continue
 
                         if symbol not in markets:
