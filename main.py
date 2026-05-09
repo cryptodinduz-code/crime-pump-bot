@@ -24,11 +24,9 @@ MAX_PAIRS_PER_EXCHANGE = 400
 MIN_VOLUME = 3_000_000
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
-# IMPROVED STOCK FILTER
+# STOCK FILTER
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
-                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK", "MUSTOCK", "STOCK", "COINBASE", 
-                  "ROBINHOOD", "TESLA", "APPLE", "MICROSOFT"]
-
+                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK"]
 
 # MAJOR PAIRS FILTER
 MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
@@ -78,7 +76,7 @@ def send_telegram(text):
 
 
 # =========================================================
-# HELPERS (unchanged)
+# HELPERS
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -227,7 +225,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 def bot_loop():
     send_telegram(
         "🚀 <b>Alpha Hunter Bot Started</b>\n"
-        f"Minimum score: {ALERT_MIN_SCORE} | Improved Stock Filter"
+        f"Minimum score: {ALERT_MIN_SCORE} | Safe Version"
     )
 
     prev_oi = {}
@@ -258,7 +256,7 @@ def bot_loop():
 
                 sorted_tickers = sorted(
                     tickers.items(),
-                    key=lambda item: item[1].get("quoteVolume", 0),
+                    key=lambda item: item[1].get("quoteVolume", 0) or 0,
                     reverse=True,
                 )
 
@@ -272,7 +270,7 @@ def bot_loop():
                         if "USDT" not in symbol:
                             continue
 
-                        # IMPROVED STOCK + MAJOR PAIRS FILTER
+                        # STOCK + MAJOR PAIRS FILTER
                         upper_symbol = symbol.upper()
                         if any(keyword in upper_symbol for keyword in STOCK_KEYWORDS):
                             continue
@@ -291,9 +289,9 @@ def bot_loop():
 
                         volume = ticker.get("quoteVolume", 0)
                         if volume is None:
-                            continue
-
+                            volume = 0
                         volume = float(volume)
+
                         if volume < MIN_VOLUME:
                             continue
 
