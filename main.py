@@ -17,16 +17,17 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 60
+ALERT_MIN_SCORE = 62   # Slightly higher for quality
 
 MAX_PAIRS_PER_EXCHANGE = 400
 
 MIN_VOLUME = 3_000_000
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
-# STOCK FILTER
+# STRONGER STOCK FILTER
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
-                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK"]
+                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK", "MUSTOCK", "STOCK", "COINBASE", 
+                  "ROBINHOOD", "TESLA", "APPLE", "MICROSOFT", "US30", "UKOIL", "USOIL", "XAU", "XAG"]
 
 # MAJOR PAIRS FILTER
 MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
@@ -69,7 +70,7 @@ def send_telegram(text):
             timeout=10,
         )
 
-        print(f"Telegram response: {response.status_code} | {response.text}")
+        print(f"Telegram response: {response.status_code}")
 
     except Exception as error:
         print(f"Telegram error: {error}")
@@ -86,7 +87,7 @@ def get_volume_spike(exchange, symbol):
         if len(candles) < 6:
             return False, 0
 
-        volumes = [candle[5] for candle in candles]
+        volumes = [candle[5] for candle in candles if candle[5] is not None]
         avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
 
         if avg_volume == 0:
@@ -225,7 +226,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 def bot_loop():
     send_telegram(
         "🚀 <b>Alpha Hunter Bot Started</b>\n"
-        f"Minimum score: {ALERT_MIN_SCORE} | Safe Version"
+        f"Minimum score: {ALERT_MIN_SCORE} | Fixed BloFin + Stronger Filters"
     )
 
     prev_oi = {}
