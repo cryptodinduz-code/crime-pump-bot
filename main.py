@@ -71,8 +71,8 @@ def send_telegram(msg):
 
     try:
         r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            f"https://api.telegram.org/bot{8634708300:AAEph9U53eSKAunguDo9IP914RCqu6kxU}/sendMessage",
+            json={"chat_id": -5156355307, "text": msg},
             timeout=10
         )
         if not r.ok:
