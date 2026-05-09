@@ -19,16 +19,16 @@ TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 LOOP_SECONDS = 60
 ALERT_MIN_SCORE = 60
 
-MAX_PAIRS_PER_EXCHANGE = 400   # ← Increased as requested
+MAX_PAIRS_PER_EXCHANGE = 400
 
-MIN_VOLUME = 2_000_000
+MIN_VOLUME = 3_000_000                    # ← Changed to 3M
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
 # STOCK FILTER
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
                   "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK"]
 
-# MAJOR PAIRS FILTER (skip big stable ones, but keep the ones you want)
+# MAJOR PAIRS FILTER
 MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
 
 
@@ -93,7 +93,7 @@ def get_volume_spike(exchange, symbol):
             return False, 0
 
         ratio = volumes[-1] / avg_volume
-        return ratio >= 2.0, ratio
+        return ratio >= 3.0, ratio          # ← Changed to 3.0x
 
     except Exception as error:
         print(f"Volume spike error {symbol}: {error}")
@@ -225,7 +225,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 def bot_loop():
     send_telegram(
         "🚀 <b>Alpha Hunter Bot Started</b>\n"
-        f"Minimum score: {ALERT_MIN_SCORE} | Stock + Major Pairs filter active"
+        f"Minimum score: {ALERT_MIN_SCORE} | Volume 3M+ & 3x Spike"
     )
 
     prev_oi = {}
@@ -270,7 +270,7 @@ def bot_loop():
                         if "USDT" not in symbol:
                             continue
 
-                        # === STOCK + MAJOR PAIRS FILTER ===
+                        # STOCK + MAJOR PAIRS FILTER
                         upper_symbol = symbol.upper()
                         if any(keyword in upper_symbol for keyword in STOCK_KEYWORDS):
                             continue
