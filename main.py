@@ -61,9 +61,14 @@ def send_telegram(text):
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+            },
             timeout=10,
         )
+
         print(f"Telegram response: {response.status_code}")
 
     except Exception as error:
@@ -77,14 +82,19 @@ def send_telegram(text):
 def get_volume_spike(exchange, symbol):
     try:
         candles = exchange.fetch_ohlcv(symbol, "5m", limit=8)
+
         if len(candles) < 6:
             return False, 0
+
         volumes = [candle[5] for candle in candles if candle[5] is not None]
         avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
+
         if avg_volume == 0:
             return False, 0
+
         ratio = volumes[-1] / avg_volume
         return ratio >= 3.0, ratio
+
     except Exception as error:
         print(f"Volume spike error {symbol}: {error}")
         return False, 0
@@ -94,15 +104,21 @@ def get_liq_heat(exchange, symbol):
     try:
         candles = exchange.fetch_ohlcv(symbol, "5m", limit=12)
         total = 0
+
         for candle in candles:
             high = candle[2]
             low = candle[3]
             close = candle[4]
             volume = candle[5]
-            if close == 0: continue
+
+            if close == 0:
+                continue
+
             range_pct = ((high - low) / close) * 100
             total += range_pct * volume
+
         return total
+
     except Exception as error:
         print(f"Liq heat error {symbol}: {error}")
         return 0
@@ -111,14 +127,19 @@ def get_liq_heat(exchange, symbol):
 def analyze_order_book(exchange, symbol):
     try:
         order_book = exchange.fetch_order_book(symbol, limit=20)
+
         bids = order_book.get("bids", [])
         asks = order_book.get("asks", [])
+
         bid_vol = sum(bid[1] for bid in bids)
         ask_vol = sum(ask[1] for ask in asks)
+
         if ask_vol == 0:
             return False, 0
+
         ratio = bid_vol / ask_vol
         return ratio > 1.4, ratio
+
     except Exception as error:
         print(f"Orderbook error {symbol}: {error}")
         return False, 0
@@ -127,20 +148,26 @@ def analyze_order_book(exchange, symbol):
 def get_open_interest_change(exchange, symbol, prev_oi):
     try:
         oi_data = exchange.fetch_open_interest(symbol)
+
         oi_value = (
             oi_data.get("openInterestAmount")
             or oi_data.get("openInterest")
             or oi_data.get("openInterestValue")
         )
+
         if oi_value is None:
             return 0
+
         oi_value = float(oi_value)
         key = f"{exchange.id}:{symbol}"
         oi_change = 0
+
         if key in prev_oi and prev_oi[key] > 0:
             oi_change = ((oi_value - prev_oi[key]) / prev_oi[key]) * 100
+
         prev_oi[key] = oi_value
         return oi_change
+
     except Exception as error:
         print(f"OI error {symbol}: {error}")
         return 0
@@ -150,6 +177,7 @@ def get_funding(exchange, symbol):
     try:
         funding_rate = exchange.fetch_funding_rate(symbol)
         return float(funding_rate.get("fundingRate", 0))
+
     except Exception as error:
         print(f"Funding error {symbol}: {error}")
         return 0
@@ -195,17 +223,27 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot Started</b>\nBloFin Fixed + 3M Volume")
+    send_telegram(
+        "🚀 <b>Alpha Hunter Bot Started</b>\n"
+        f"Minimum score: {ALERT_MIN_SCORE} | BloFin Fixed"
+    )
 
     prev_oi = {}
 
     while True:
-        print(f"\n==============================\nSCAN STARTED {datetime.datetime.utcnow()}\n==============================")
+        print(
+            f"\n==============================\n"
+            f"SCAN STARTED {datetime.datetime.utcnow()}\n"
+            f"=============================="
+        )
 
         alerts_fired = 0
 
         exchanges = {
-            "MEXC": ccxt.mexc({"enableRateLimit": True, "options": {"defaultType": "swap"}}),
+            "MEXC": ccxt.mexc({
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"}
+            }),
             "BloFin": ccxt.blofin({"enableRateLimit": True})
         }
 
@@ -213,6 +251,7 @@ def bot_loop():
             print(f"\n🔍 Scanning {name}")
 
             try:
+                markets = exchange.load_markets()
                 tickers = exchange.fetch_tickers()
                 print(f"  → {name}: Loaded {len(tickers)} tickers")
 
@@ -223,25 +262,21 @@ def bot_loop():
                 )
 
                 scanned = 0
+                processed = 0
 
                 for symbol, ticker in sorted_tickers:
                     try:
                         if scanned >= MAX_PAIRS_PER_EXCHANGE:
                             break
+
                         if "USDT" not in symbol:
                             continue
 
+                        # STOCK + MAJOR PAIRS FILTER
                         upper_symbol = symbol.upper()
-                        if any(k in upper_symbol for k in STOCK_KEYWORDS):
+                        if any(keyword in upper_symbol for keyword in STOCK_KEYWORDS):
                             continue
-                        if any(m in upper_symbol for m in MAJOR_PAIRS):
-                            continue
-
-                        if symbol not in exchange.markets:
-                            continue
-
-                        market = exchange.markets[symbol]
-                        if not (market.get("swap") or market.get("future")):
+                        if any(major in upper_symbol for major in MAJOR_PAIRS):
                             continue
 
                         scanned += 1
@@ -254,12 +289,14 @@ def bot_loop():
                         if volume < MIN_VOLUME:
                             continue
 
+                        processed += 1
+
                         last_price = ticker.get("last", 0) or 0
 
                         funding = get_funding(exchange, symbol)
-                        _, vol_ratio = get_volume_spike(exchange, symbol)
+                        _vol_spike, vol_ratio = get_volume_spike(exchange, symbol)
                         oi_change = get_open_interest_change(exchange, symbol, prev_oi)
-                        _, ob_ratio = analyze_order_book(exchange, symbol)
+                        _ob_pressure, ob_ratio = analyze_order_book(exchange, symbol)
                         liq_heat = get_liq_heat(exchange, symbol)
 
                         print(
@@ -272,11 +309,19 @@ def bot_loop():
                             f"Liq={liq_heat:.1f}"
                         )
 
-                        score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume)
+                        score, reasons = calculate_score(
+                            funding,
+                            vol_ratio,
+                            oi_change,
+                            ob_ratio,
+                            liq_heat,
+                            volume,
+                        )
 
                         if score >= ALERT_MIN_SCORE:
                             alerts_fired += 1
-                            reason_text = "\n".join([f"• {r}" for r in reasons])
+                            reason_text = "\n".join([f"• {reason}" for reason in reasons])
+
                             msg = f"""
 🚨 <b>ALPHA SIGNAL</b>
 
@@ -284,30 +329,37 @@ def bot_loop():
 🏦 Exchange: {name}
 
 💰 Price: ${last_price:.6g}
-📊 Volume: ${volume / 1e6:.2f}M
+📊 24h Volume: ${volume / 1e6:.2f}M
 
-📈 Funding: {funding*100:+.4f}%
-📦 OI: {oi_change:+.2f}%
-📚 OB: {ob_ratio:.2f}
-⚡ Spike: {vol_ratio:.2f}x
+📈 Funding: {funding * 100:+.4f}%
+📦 OI Change: {oi_change:+.2f}%
+📚 Orderbook Ratio: {ob_ratio:.2f}
+⚡ Volume Spike: {vol_ratio:.2f}x
 
-Score: <b>{score}/100</b>
+🎯 Score: <b>{score}/100</b>
 
 {reason_text}
 """
+
                             print(msg)
                             send_telegram(msg)
                             time.sleep(1)
 
-                    except Exception as e:
-                        print(f"Pair error {symbol}: {e}")
+                    except Exception as error:
+                        print(f"Pair error {symbol}: {error}")
 
-            except Exception as e:
-                print(f"❌ {name} exchange error: {e}")
+                print(f"  → {name}: Scanned {scanned} | Processed {processed} pairs")
+
+            except Exception as error:
+                print(f"❌ {name} exchange error: {error}")
 
         print(f"\n✅ Scan completed | Alerts fired: {alerts_fired}\n")
         time.sleep(LOOP_SECONDS)
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
