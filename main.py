@@ -6,6 +6,10 @@ import threading
 import requests
 from flask import Flask
 from collections import defaultdict
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from mplfinance.original_flavor import candlestick_ohlc
+import numpy as np
 
 # =========================================================
 # CONFIG
@@ -35,7 +39,7 @@ MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "
 
 
 # =========================================================
-# FLASK + TELEGRAM
+# FLASK + TELEGRAM WITH CHART SUPPORT
 # =========================================================
 
 app = Flask(__name__)
@@ -48,19 +52,70 @@ def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-def send_telegram(text):
+def send_telegram(text, photo_path=None):
     if not TG_ENABLED: return
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-    except: pass
+        if photo_path and os.path.exists(photo_path):
+            with open(photo_path, 'rb') as photo:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": text, "parse_mode": "HTML"},
+                    files={"photo": photo},
+                    timeout=20,
+                )
+            os.remove(photo_path)
+        else:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 
 # =========================================================
-# HELPERS
+# 1H CHART GENERATOR
+# =========================================================
+
+def generate_1h_chart(exchange, symbol, last_price):
+    try:
+        candles = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=60)
+        if len(candles) < 20:
+            return None
+
+        ohlc = []
+        for candle in candles:
+            ohlc.append([
+                mdates.date2num(datetime.datetime.fromtimestamp(candle[0]/1000)),
+                candle[1], candle[2], candle[3], candle[4]
+            ])
+
+        fig, ax = plt.subplots(figsize=(11, 6))
+        candlestick_ohlc(ax, ohlc, width=0.0008, colorup='green', colordown='red', alpha=0.8)
+
+        ax.set_title(f"{symbol} — 1H Chart", fontsize=14, fontweight='bold')
+        ax.set_ylabel("Price (USDT)")
+        ax.grid(True, alpha=0.3)
+
+        # Latest price line
+        ax.axhline(y=last_price, color='blue', linestyle='--', linewidth=1.5, alpha=0.8)
+        ax.text(ohlc[-1][0], last_price * 1.002, f' ${last_price:.6g}', color='blue', fontsize=11)
+
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        filename = f"chart_{symbol.replace('/', '_')}.png"
+        plt.savefig(filename, dpi=220, bbox_inches='tight')
+        plt.close(fig)
+        return filename
+    except Exception as e:
+        print(f"Chart failed for {symbol}: {e}")
+        return None
+
+
+# =========================================================
+# HELPERS (All previous + Smart Detection)
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -116,14 +171,13 @@ def get_funding(exchange, symbol):
     except:
         return 0
 
-# Smart Early Detection (reduced weight)
 def detect_accumulation(candles):
     try:
         if len(candles) < 12: return 0
         recent_vol = sum(c[5] for c in candles[-6:]) / 6
         older_vol = sum(c[5] for c in candles[-12:-6]) / 6
         vol_creep = recent_vol / older_vol if older_vol > 0 else 0
-        return min(max((vol_creep - 1.0) * 18, 0), 18)   # Reduced
+        return min(max((vol_creep - 1.0) * 18, 0), 18)
     except:
         return 0
 
@@ -134,7 +188,7 @@ def detect_liquidity_compression(candles):
         avg_range = sum(ranges) / len(ranges)
         latest_range = ranges[-1]
         compression = 1 - (latest_range / avg_range) if avg_range > 0 else 0
-        return min(max(compression * 15, 0), 15)   # Reduced
+        return min(max(compression * 15, 0), 15)
     except:
         return 0
 
@@ -144,9 +198,6 @@ def detect_fakeout_risk(vol_ratio, ob_ratio, funding):
     if abs(funding) > 0.0005 and vol_ratio < 2.5: risk += 12
     return risk
 
-# =========================================================
-# SCORING ENGINE (capped at 100)
-# =========================================================
 
 def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, candles=None):
     score = 0
@@ -165,34 +216,29 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, c
     if volume < LOW_VOLUME_BONUS_LIMIT:
         score += 10; reasons.append("Midcap Momentum")
 
-    # Smart signals (reduced weight)
     if candles:
         acc = detect_accumulation(candles)
         if acc > 8:
             score += acc
             reasons.append("Accumulation Building")
-
         comp = detect_liquidity_compression(candles)
         if comp > 7:
             score += comp
             reasons.append("Liquidity Compression")
 
-    # Fakeout penalty
     fake_penalty = detect_fakeout_risk(vol_ratio, ob_ratio, funding)
     score = max(15, score - fake_penalty)
-
-    # Hard cap at 100
     score = min(int(score), 100)
 
     return score, reasons
 
 
 # =========================================================
-# MAIN LOOP
+# MAIN BOT LOOP
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v20</b>\nSmart Early Detection + Cap 100")
+    send_telegram("🚀 <b>Alpha Hunter Bot v21</b>\n1H Charts + Smart Early Detection")
 
     prev_oi = {}
     last_alert = defaultdict(lambda: 0)
@@ -217,8 +263,7 @@ def bot_loop():
 
                 sorted_tickers = sorted(tickers.items(), key=lambda x: float(x[1].get("quoteVolume") or 0), reverse=True)
 
-                scanned = 0
-                processed = 0
+                scanned = processed = 0
 
                 for symbol, ticker in sorted_tickers:
                     if scanned >= MAX_PAIRS_PER_EXCHANGE: break
@@ -234,8 +279,7 @@ def bot_loop():
                     if name == "BloFin" and volume == 0:
                         volume = float(ticker.get("baseVolume") or 0) * 1000
 
-                    if volume < MIN_VOLUME or volume > MAX_VOLUME:
-                        continue
+                    if volume < MIN_VOLUME or volume > MAX_VOLUME: continue
 
                     processed += 1
 
@@ -253,25 +297,23 @@ def bot_loop():
 
                     score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, candles)
 
-                    print(
-                        f"✅ {name} | {symbol} | Vol=${volume/1e6:.2f}M | Spike={vol_ratio:.2f}x | Score={score}"
-                    )
-
                     if score >= ALERT_MIN_SCORE:
-                        if now - last_alert[symbol] < 2700:  # 45 min dedup
-                            continue
+                        if now - last_alert[symbol] < 2700: continue
                         last_alert[symbol] = now
 
                         alerts_fired += 1
                         reason_text = "\n".join([f"• {r}" for r in reasons])
+
+                        chart_path = generate_1h_chart(ex, symbol, last_price)
+
                         msg = f"""
 🚨 <b>ALPHA SIGNAL</b>
 
 🔥 <b>{symbol}</b>
-🏦 Exchange: {name}
+🏦 {name}
 
 💰 Price: ${last_price:.6g}
-📊 Volume: ${volume / 1e6:.2f}M
+📊 Vol: ${volume/1e6:.2f}M
 
 📈 Funding: {funding*100:+.4f}%
 📦 OI: {oi_change:+.2f}%
@@ -281,10 +323,10 @@ def bot_loop():
 🎯 Score: <b>{score}/100</b>
 
 {reason_text}
-"""
-                        print(msg)
-                        send_telegram(msg)
-                        time.sleep(1)
+                        """
+
+                        send_telegram(msg, chart_path)
+                        print(f"🚨 SIGNAL SENT → {symbol} | Score: {score}")
 
                 print(f"  → {name}: Scanned {scanned} | Processed {processed}")
 
