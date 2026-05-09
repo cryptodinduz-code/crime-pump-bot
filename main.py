@@ -17,12 +17,16 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 60   # ← Raised as requested
+ALERT_MIN_SCORE = 60
 
 MAX_PAIRS_PER_EXCHANGE = 250
 
 MIN_VOLUME = 2_000_000
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
+
+# STOCK FILTER
+STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
+                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK"]
 
 
 # =========================================================
@@ -177,31 +181,32 @@ def get_funding(exchange, symbol):
 
 
 # =========================================================
-# SCORING ENGINE
+# SCORING ENGINE - BALANCED
 # =========================================================
 
 def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
     score = 0
     reasons = []
 
-    if abs(funding) > 0.00015:
-        score += 20
-        reasons.append("Funding Extreme")
-
-    if vol_ratio > 2:
+    # More balanced scoring
+    if abs(funding) > 0.00025:
         score += 25
+        reasons.append("Extreme Funding")
+
+    if vol_ratio > 2.5:
+        score += 28
         reasons.append(f"Volume Spike {vol_ratio:.1f}x")
 
-    if oi_change > 5:
-        score += 20
+    if oi_change > 8:
+        score += 18
         reasons.append(f"OI +{oi_change:.1f}%")
 
-    if ob_ratio > 1.4:
-        score += 15
+    if ob_ratio > 1.6:
+        score += 18
         reasons.append(f"Buy Pressure {ob_ratio:.2f}")
 
-    if liq_heat > 500:
-        score += 10
+    if liq_heat > 1000:
+        score += 12
         reasons.append("Liquidation Pressure")
 
     if volume < LOW_VOLUME_BONUS_LIMIT:
@@ -218,7 +223,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 def bot_loop():
     send_telegram(
         "🚀 <b>Alpha Hunter Bot Started</b>\n"
-        f"Minimum score: {ALERT_MIN_SCORE}"
+        f"Minimum score: {ALERT_MIN_SCORE} | Balanced Scoring + Stock Filter"
     )
 
     prev_oi = {}
@@ -238,7 +243,6 @@ def bot_loop():
                 "options": {"defaultType": "swap"}
             }),
             "BloFin": ccxt.blofin({"enableRateLimit": True})
-            # Binance removed as requested
         }
 
         for name, exchange in exchanges.items():
@@ -262,6 +266,10 @@ def bot_loop():
                             break
 
                         if "USDT" not in symbol:
+                            continue
+
+                        # STOCK FILTER
+                        if any(keyword in symbol.upper() for keyword in STOCK_KEYWORDS):
                             continue
 
                         if symbol not in markets:
