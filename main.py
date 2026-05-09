@@ -15,7 +15,7 @@ TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP = 60
 MAX_PAIRS = 200
-MIN_ALERT = 68
+MIN_ALERT = 60
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
@@ -27,7 +27,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "CRIME ENGINE V12.1 FIXED"
+    return "CRIME ENGINE V13 EARLY ALPHA"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
@@ -74,15 +74,104 @@ def exchanges():
 # CANDLES
 # =========================================================
 
-def candles(ex, s, tf="5m", n=30):
+def candles(ex, s, tf="5m", n=40):
     try:
         c = ex.fetch_ohlcv(s, tf, limit=n)
-        return c if c and len(c) > 15 else None
+        return c if c and len(c) > 25 else None
     except:
         return None
 
 # =========================================================
-# REGIME
+# 1. ENERGY BUILDUP (IMPROVED COMPRESSION)
+# =========================================================
+
+def energy_build(ex, s):
+    c = candles(ex, s)
+    if not c:
+        return 0
+
+    highs = [f(x[2]) for x in c]
+    lows = [f(x[3]) for x in c]
+
+    early_range = max(highs[:20]) - min(lows[:20])
+    late_range = max(highs[-20:]) - min(lows[-20:])
+
+    if early_range == 0:
+        return 0
+
+    squeeze = (early_range - late_range) / early_range
+
+    return min(max(squeeze, 0), 1)
+
+# =========================================================
+# 2. PRESSURE BREAKOUT (NOT CONFIRMED BREAKOUT)
+# =========================================================
+
+def breakout_pressure(ex, s):
+    c = candles(ex, s)
+    if not c:
+        return 0
+
+    closes = [f(x[4]) for x in c]
+    highs = [f(x[2]) for x in c]
+
+    resistance = max(highs[-20:-3])
+
+    distance = (closes[-1] - resistance) / resistance
+
+    if distance > 0:
+        return min(distance * 8, 1)   # early pressure scaling
+
+    return 0
+
+# =========================================================
+# 3. VOLUME PRESSURE (EARLY ACCELERATION)
+# =========================================================
+
+def volume_pressure(ex, s):
+    c = candles(ex, s)
+    if not c:
+        return 0
+
+    vols = [f(x[5]) for x in c]
+
+    short = sum(vols[-5:]) / 5
+    long = sum(vols[-20:-5]) / 15
+
+    if long == 0:
+        return 0
+
+    ratio = short / long
+
+    return min((ratio - 1) * 2, 1)
+
+# =========================================================
+# 4. SWEEP PRESSURE (GRADIENT VERSION)
+# =========================================================
+
+def sweep_pressure(ex, s):
+    c = candles(ex, s)
+    if not c:
+        return 0
+
+    highs = [f(x[2]) for x in c[:-1]]
+    lows = [f(x[3]) for x in c[:-1]]
+
+    last = c[-1]
+    h, l, cl = f(last[2]), f(last[3]), f(last[4])
+
+    pressure = 0
+
+    if h > max(highs):
+        pressure += (h - max(highs)) / max(highs)
+
+    if l < min(lows):
+        pressure += (min(lows) - l) / min(lows)
+
+    return min(pressure * 5, 1)
+
+# =========================================================
+# 5. REGIME (WEIGHTED CONTEXT)
 # =========================================================
 
 def regime(ex, s):
@@ -97,105 +186,24 @@ def regime(ex, s):
     return 0.65 if trend else 0.35
 
 # =========================================================
-# COMPRESSION
+# FINAL SCORE (CALIBRATED EARLY ALPHA MODEL)
 # =========================================================
 
-def compression(ex, s):
-    c = candles(ex, s)
-    if not c:
-        return 0
+def score(reg, energy, brk, vol, sweep):
 
-    highs = [f(x[2]) for x in c]
-    lows = [f(x[3]) for x in c]
-
-    old_range = max(highs[:15]) - min(lows[:15])
-    new_range = max(highs[-15:]) - min(lows[-15:])
-
-    if new_range <= 0:
-        return 0
-
-    ratio = old_range / new_range
-
-    return min((ratio - 1) / 4, 1)
-
-# =========================================================
-# BREAKOUT
-# =========================================================
-
-def breakout(ex, s):
-    c = candles(ex, s)
-    if not c:
-        return 0
-
-    closes = [f(x[4]) for x in c]
-    highs = [f(x[2]) for x in c]
-
-    resistance = max(highs[-12:-2])
-
-    broke = closes[-1] > resistance
-    follow = closes[-1] > closes[-2]
-
-    return 0.85 if (broke and follow) else 0
-
-# =========================================================
-# VOLUME
-# =========================================================
-
-def volume(ex, s, breakout_active):
-    c = candles(ex, s)
-    if not c:
-        return 0
-
-    vols = [f(x[5]) for x in c]
-
-    avg = sum(vols[:-1]) / max(len(vols[:-1]), 1)
-    if avg == 0:
-        return 0
-
-    spike = vols[-1] / avg
-
-    base = min((spike - 1) / 5, 1)
-
-    if breakout_active:
-        base *= 0.6
-
-    return base
-
-# =========================================================
-# SWEEP
-# =========================================================
-
-def sweep(ex, s):
-    c = candles(ex, s)
-    if not c:
-        return 0
-
-    highs = [f(x[2]) for x in c[:-1]]
-    lows = [f(x[3]) for x in c[:-1]]
-
-    last = c[-1]
-    h, l, cl = f(last[2]), f(last[3]), f(last[4])
-
-    if h > max(highs) or l < min(lows):
-        return 1
-
-    return 0
-
-# =========================================================
-# SCORE (FIXED SYNTAX)
-# =========================================================
-
-def score(reg, comp, brk, vol, swp):
-
+    # EARLY ALPHA WEIGHTS (very important change)
     raw = (
-        comp * 0.22 +
-        brk * 0.32 +
+        energy * 0.30 +
+        brk * 0.25 +
         vol * 0.20 +
-        swp * 0.16 +
+        sweep * 0.15 +
         reg * 0.10
     )
 
-    return max(1, min(raw * 100, 100))
+    # soft curve (prevents clustering at 0–10)
+    adjusted = raw ** 0.7
+
+    return max(1, min(adjusted * 100, 100))
 
 # =========================================================
 # MAIN LOOP
@@ -203,7 +211,7 @@ def score(reg, comp, brk, vol, swp):
 
 def run():
 
-    tg("🚀 CRIME ENGINE V12.1 FIXED LIVE")
+    tg("🚀 V13 EARLY ALPHA ENGINE LIVE")
 
     while True:
 
@@ -246,13 +254,13 @@ def run():
 
                 for s, vol in universe:
 
+                    energy = energy_build(ex, s)
+                    brk = breakout_pressure(ex, s)
+                    volx = volume_pressure(ex, s)
+                    swp = sweep_pressure(ex, s)
                     reg = regime(ex, s)
-                    comp = compression(ex, s)
-                    brk = breakout(ex, s)
-                    volx = volume(ex, s, brk > 0)
-                    swp = sweep(ex, s)
 
-                    sc = score(reg, comp, brk, volx, swp)
+                    sc = score(reg, energy, brk, volx, swp)
 
                     print(f"{s} | crime={sc:.1f}")
 
@@ -260,17 +268,17 @@ def run():
                         continue
 
                     msg = f"""
-🚨 CRIME SIGNAL V12.1
+🚨 CRIME SIGNAL V13
 
 {s}
 Crime Score: {sc:.1f}/100
 
-Breakdown:
+Early Alpha Signals:
+• Energy Build: {energy:.2f}
+• Break Pressure: {brk:.2f}
+• Volume Accel: {volx:.2f}
+• Sweep Pressure: {swp:.2f}
 • Regime: {reg:.2f}
-• Compression: {comp:.2f}
-• Breakout: {brk:.2f}
-• Volume: {volx:.2f}
-• Sweep: {swp}
 """
 
                     tg(msg)
