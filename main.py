@@ -7,27 +7,27 @@ from flask import Flask
 # CONFIG
 # =========================================================
 
-LOOP = 60
+LOOP_SECONDS = 60
 MAX_PAIRS = 120
 MIN_SCORE = 60
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
 # =========================================================
-# SERVER
+# WEB SERVER (KEEP ALIVE)
 # =========================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ALPHA ENGINE V18 FULL LIVE"
+    return "ALPHA ENGINE V20 ONLINE"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
 
 # =========================================================
-# SAFE UTILS
+# SAFE NUMERIC CORE (CRITICAL)
 # =========================================================
 
 def f(x):
@@ -36,13 +36,22 @@ def f(x):
             return 0.0
         if isinstance(x, complex):
             return float(x.real)
-        return float(x)
+        x = float(x)
+        if x != x:  # NaN check
+            return 0.0
+        return x
     except:
         return 0.0
 
 
+def clamp(x, mn=0.0, mx=10.0):
+    x = f(x)
+    return max(mn, min(mx, x))
+
+
 def safe_div(a, b):
-    return a / b if b and b != 0 else 0.0
+    a, b = f(a), f(b)
+    return a / b if b != 0 else 0.0
 
 # =========================================================
 # EXCHANGES
@@ -87,6 +96,7 @@ def get_pairs(ex):
                 continue
 
             vol = f(t.get("quoteVolume") or t.get("baseVolume"))
+
             if vol <= 0:
                 continue
 
@@ -104,6 +114,7 @@ def get_pairs(ex):
 # =========================================================
 
 def candles(ex, s):
+
     try:
         c = ex.fetch_ohlcv(s, "5m", limit=40)
         if not c or len(c) < 25:
@@ -113,30 +124,30 @@ def candles(ex, s):
         return None
 
 # =========================================================
-# FUNDING + OI (SAFE OPTIONAL LAYER)
+# FUNDING / OI (SAFE OPTIONAL)
 # =========================================================
 
-def funding(ex, symbol):
+def funding(ex, s):
     try:
         if hasattr(ex, "fetch_funding_rate"):
-            fr = ex.fetch_funding_rate(symbol)
+            fr = ex.fetch_funding_rate(s)
             return f(fr.get("fundingRate"))
     except:
         pass
     return 0.0
 
 
-def open_interest(ex, symbol):
+def open_interest(ex, s):
     try:
         if hasattr(ex, "fetch_open_interest"):
-            oi = ex.fetch_open_interest(symbol)
+            oi = ex.fetch_open_interest(s)
             return f(oi.get("openInterest") or oi.get("openInterestAmount"))
     except:
         pass
     return 0.0
 
 # =========================================================
-# FEATURES
+# FEATURES (ALPHA CORE)
 # =========================================================
 
 def features(c):
@@ -146,24 +157,24 @@ def features(c):
     closes = [f(x[4]) for x in c]
     vols = [f(x[5]) for x in c]
 
-    # compression
+    # compression (pre-move squeeze)
     old_range = max(highs[:20]) - min(lows[:20])
     new_range = max(highs[-20:]) - min(lows[-20:])
-    comp = safe_div(old_range - new_range, old_range)
+    comp = clamp(safe_div(old_range - new_range, old_range))
 
     # breakout pressure
     resistance = max(highs[-15:-3])
-    brk = safe_div(closes[-1] - resistance, resistance)
-    brk = max(0, brk)
+    brk = clamp(safe_div(closes[-1] - resistance, resistance))
+    brk = max(0.0, brk)
 
     # volume acceleration
     short = sum(vols[-5:]) / 5
     long = sum(vols[-20:-5]) / 15 if len(vols) > 20 else short
-    vol = safe_div(short - long, long)
-    vol = max(0, vol)
+    vol = clamp(safe_div(short - long, long))
+    vol = max(0.0, vol)
 
-    # sweep
-    swp = 0
+    # sweep detection
+    swp = 0.0
     if highs[-1] > max(highs[:-1]):
         swp += 0.5
     if lows[-1] < min(lows[:-1]):
@@ -172,21 +183,23 @@ def features(c):
     return comp, brk, vol, swp
 
 # =========================================================
-# SCORE (FULL MULTI-FACTOR MODEL)
+# SCORE ENGINE (STABLE 1–100)
 # =========================================================
 
 def score(comp, brk, vol, swp, fund, oi):
 
     raw = (
-        comp * 0.28 +
+        comp * 0.30 +
         brk * 0.25 +
         vol * 0.20 +
-        swp * 0.12 +
-        abs(fund) * 0.10 +
-        safe_div(oi, 1_000_000) * 0.05
+        swp * 0.15 +
+        abs(f(fund)) * 0.05 +
+        clamp(oi / 1_000_000) * 0.05
     )
 
-    return max(1, min((raw ** 0.75) * 100, 100))
+    raw = max(0.0, min(raw, 2.0))
+
+    return max(1, min(raw * 50, 100))
 
 # =========================================================
 # MAIN LOOP
@@ -231,7 +244,7 @@ def run():
                     print("🚨 SIGNAL:", s, sc)
 
         print("SCAN COMPLETE\n")
-        time.sleep(LOOP)
+        time.sleep(LOOP_SECONDS)
 
 # =========================================================
 # START
