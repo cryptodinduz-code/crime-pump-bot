@@ -1,6 +1,7 @@
 import ccxt
 import time
 import threading
+import requests
 from flask import Flask
 
 # =========================================================
@@ -8,10 +9,16 @@ from flask import Flask
 # =========================================================
 
 LOOP = 60
+MIN_SCORE = 70
 MAX_PAIRS = 120
-MIN_SCORE = 60
+
+TIMEFRAMES = ["5m", "15m", "1h", "4h"]
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
+
+TELEGRAM_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
+TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 # =========================================================
 # SERVER
@@ -21,13 +28,13 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ALPHA ENGINE V23 FULL PRESERVE LIVE"
+    return "V26 ALPHA ENGINE LIVE"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
 
 # =========================================================
-# SAFE MATH CORE (NO FEATURE LOSS)
+# SAFE MATH
 # =========================================================
 
 def f(x):
@@ -44,14 +51,34 @@ def f(x):
         return 0.0
 
 
-def clamp(x, a=0.0, b=10.0):
+def clamp(x, a=0, b=1):
     x = f(x)
     return max(a, min(b, x))
 
 
-def safe_div(a, b):
+def div(a, b):
     a, b = f(a), f(b)
     return a / b if b else 0.0
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+def send_telegram(msg):
+    if not TG_ENABLED:
+        print("[TG OFF]", msg)
+        return
+
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=10
+        )
+        if not r.ok:
+            print("TG ERROR:", r.text)
+    except Exception as e:
+        print("TG EXCEPTION:", e)
 
 # =========================================================
 # EXCHANGES
@@ -63,31 +90,16 @@ def exchanges():
         "BloFin": ccxt.blofin({"enableRateLimit": True})
     }
 
-
-def load(ex):
-    try:
-        ex.load_markets()
-    except:
-        pass
-
 # =========================================================
-# PAIRS
+# MARKET LOAD
 # =========================================================
 
 def get_pairs(ex):
-
     pairs = []
-
     try:
-        tickers = ex.fetch_tickers()
+        markets = ex.load_markets()
 
-        for s, t in tickers.items():
-
-            if not s:
-                continue
-
-            s = str(s).upper().replace(":USDT", "")
-
+        for s in markets:
             if "/USDT" not in s:
                 continue
 
@@ -95,128 +107,148 @@ def get_pairs(ex):
             if base in MAJORS:
                 continue
 
-            vol = f(t.get("quoteVolume") or t.get("baseVolume"))
-            if vol <= 0:
+            try:
+                t = ex.fetch_ticker(s)
+                v = f(t.get("quoteVolume") or t.get("baseVolume"))
+                if v > 0:
+                    pairs.append((s, v))
+            except:
                 continue
-
-            pairs.append((s, vol))
 
     except:
         return []
 
     pairs.sort(key=lambda x: x[1], reverse=True)
-
     return pairs[:MAX_PAIRS]
 
 # =========================================================
 # CANDLES
 # =========================================================
 
-def candles(ex, s):
+def get_candles(ex, symbol, tf):
     try:
-        c = ex.fetch_ohlcv(s, "5m", limit=40)
-        if not c or len(c) < 25:
+        c = ex.fetch_ohlcv(symbol, tf, limit=60)
+        if not c or len(c) < 40:
             return None
         return c
     except:
         return None
 
 # =========================================================
-# FUNDING + OI (PRESERVED, SAFE)
+# STRUCTURE ENGINE
 # =========================================================
 
-def funding(ex, s):
-    try:
-        if hasattr(ex, "fetch_funding_rate"):
-            fr = ex.fetch_funding_rate(s)
-            return f(fr.get("fundingRate"))
-    except:
-        pass
-    return 0.0
-
-
-def open_interest(ex, s):
-    try:
-        if hasattr(ex, "fetch_open_interest"):
-            oi = ex.fetch_open_interest(s)
-            return f(oi.get("openInterest") or oi.get("openInterestAmount"))
-    except:
-        pass
-    return 0.0
-
-# =========================================================
-# FEATURES (ALL FEATURES PRESERVED)
-# =========================================================
-
-def features(c):
+def structure(c):
 
     highs = [f(x[2]) for x in c]
     lows = [f(x[3]) for x in c]
     closes = [f(x[4]) for x in c]
     vols = [f(x[5]) for x in c]
 
-    # ---------------------------
-    # 1. COMPRESSION (PRESERVED)
-    # ---------------------------
-    old_range = max(highs[:20]) - min(lows[:20])
-    new_range = max(highs[-20:]) - min(lows[-20:])
+    old_range = max(highs[:30]) - min(lows[:30])
+    new_range = max(highs[-30:]) - min(lows[-30:])
 
-    comp = 0.0
+    comp = 0
     if old_range > 0:
-        comp = 1 - (new_range / old_range)
-        comp = max(0.0, min(comp * 3.0, 1.0))
+        comp = 1 - new_range / old_range
 
-    # ---------------------------
-    # 2. BREAKOUT PRESSURE (PRESERVED)
-    # ---------------------------
-    resistance = max(highs[-20:-3])
-    move = safe_div(closes[-1] - resistance, resistance)
-    brk = max(0.0, min(move * 10, 1.0))
+    resistance = max(highs[-25:-5])
+    breakout = div(closes[-1] - resistance, resistance)
 
-    # ---------------------------
-    # 3. VOLUME ACCELERATION (PRESERVED)
-    # ---------------------------
-    short = sum(vols[-5:]) / 5
-    long = sum(vols[-20:-5]) / 15 if len(vols) > 20 else short
+    return clamp(comp * 2), clamp(breakout * 5)
 
-    vol = 0.0
-    if long > 0:
-        vol = (short / long - 1)
-        vol = max(0.0, min(vol * 2.0, 1.0))
+# =========================================================
+# FLOW ENGINE
+# =========================================================
 
-    # ---------------------------
-    # 4. LIQUIDITY SWEEP (PRESERVED)
-    # ---------------------------
-    swp = 0.0
+def flow(c):
+
+    vols = [f(x[5]) for x in c]
+
+    short = sum(vols[-10:]) / 10
+    long = sum(vols[-40:-10]) / 30 if len(vols) > 40 else short
+
+    vol = div(short, long) - 1
+
+    sweep = 0
+    highs = [f(x[2]) for x in c]
+    lows = [f(x[3]) for x in c]
+
     if highs[-1] >= max(highs[:-1]):
-        swp += 0.5
+        sweep += 0.5
     if lows[-1] <= min(lows[:-1]):
-        swp += 0.5
+        sweep += 0.5
 
-    return comp, brk, vol, swp
+    return clamp(vol), sweep
 
 # =========================================================
-# SCORE (REBALANCED, NO FEATURE LOSS)
+# DERIVATIVES (SAFE)
 # =========================================================
 
-def score(comp, brk, vol, swp, fund, oi):
+def derivatives(ex, s):
+
+    fund = 0
+    oi = 0
+
+    try:
+        if hasattr(ex, "fetch_funding_rate"):
+            fr = ex.fetch_funding_rate(s)
+            fund = f(fr.get("fundingRate"))
+    except:
+        pass
+
+    try:
+        if hasattr(ex, "fetch_open_interest"):
+            oi_data = ex.fetch_open_interest(s)
+            oi = f(oi_data.get("openInterest") or oi_data.get("openInterestAmount"))
+    except:
+        pass
+
+    return clamp(abs(fund) * 50), clamp(oi / 1_000_000)
+
+# =========================================================
+# MULTI TIMEFRAME
+# =========================================================
+
+def mtf_score(ex, s):
+
+    scores = []
+
+    for tf in TIMEFRAMES:
+        c = get_candles(ex, s, tf)
+        if not c:
+            continue
+
+        comp, brk = structure(c)
+        vol, swp = flow(c)
+
+        score = (comp + brk + vol + swp) / 4
+        scores.append(score)
+
+    if not scores:
+        return 0
+
+    return sum(scores) / len(scores)
+
+# =========================================================
+# FINAL SCORE ENGINE
+# =========================================================
+
+def score(struct, flow, deriv, mtf):
 
     raw = (
-        comp * 0.30 +
-        brk * 0.25 +
-        vol * 0.20 +
-        swp * 0.10 +
-        abs(f(fund)) * 0.10 +
-        clamp(oi / 1_000_000) * 0.05
+        struct * 0.30 +
+        flow * 0.25 +
+        deriv * 0.20 +
+        mtf * 0.25
     )
 
-    # keep full sensitivity but stable distribution
-    raw = max(0.0, min(raw, 2.0))
+    raw = clamp(raw * 1.2)
 
-    return max(1, min(raw * 50, 100))
+    return max(1, min(raw * 100, 100))
 
 # =========================================================
-# MAIN LOOP
+# RUN
 # =========================================================
 
 def run():
@@ -229,33 +261,29 @@ def run():
 
             print(f"\nScanning {name}")
 
-            load(ex)
-
             pairs = get_pairs(ex)
 
             print(f"{name} pairs: {len(pairs)}")
 
-            for s, vol in pairs[:20]:
+            for s, _ in pairs[:25]:
 
-                c = candles(ex, s)
+                c = get_candles(ex, s, "5m")
                 if not c:
                     continue
 
-                comp, brk, volx, swp = features(c)
+                struct = sum(structure(c)) / 2
+                flow_score = sum(flow(c)) / 2
+                deriv = sum(derivatives(ex, s)) / 2
+                mtf = mtf_score(ex, s)
 
-                fund = funding(ex, s)
-                oi = open_interest(ex, s)
+                sc = score(struct, flow_score, deriv, mtf)
 
-                sc = score(comp, brk, volx, swp, fund, oi)
+                line = f"{s} | score={sc:.1f} | s={struct:.2f} f={flow_score:.2f} d={deriv:.2f} m={mtf:.2f}"
 
-                print(
-                    f"{s} | score={sc:.1f} | "
-                    f"c={comp:.2f} b={brk:.2f} v={volx:.2f} s={swp:.2f} "
-                    f"f={fund:.4f} oi={oi:.0f}"
-                )
+                print(line)
 
                 if sc >= MIN_SCORE:
-                    print("🚨 SIGNAL:", s, sc)
+                    send_telegram("🚨 V26 SIGNAL\n" + line)
 
         print("SCAN COMPLETE\n")
         time.sleep(LOOP)
