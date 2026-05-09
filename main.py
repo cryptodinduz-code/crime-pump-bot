@@ -5,6 +5,7 @@ import datetime
 import threading
 import requests
 from flask import Flask
+from collections import defaultdict
 
 # =========================================================
 # CONFIG
@@ -20,16 +21,17 @@ ALERT_MIN_SCORE = 60
 
 MAX_PAIRS_PER_EXCHANGE = 400
 
-MIN_VOLUME = 3_000_000
-BLOFIN_MIN_VOLUME = 800_000   # relaxed
+MIN_VOLUME = 6_000_000      # New minimum
+MAX_VOLUME = 150_000_000    # New maximum
+BLOFIN_MIN_VOLUME = 2_000_000
 
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
+# Filters
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
                   "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK", "MUSTOCK", "STOCK"]
 
 MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
-
 
 # =========================================================
 # FLASK + TELEGRAM
@@ -57,7 +59,7 @@ def send_telegram(text):
 
 
 # =========================================================
-# HELPERS (ALL PREVIOUS FEATURES)
+# HELPERS (All previous features kept)
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -67,7 +69,7 @@ def get_volume_spike(exchange, symbol):
         volumes = [c[5] for c in candles if c[5] is not None]
         avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 0
         ratio = volumes[-1] / avg if avg > 0 else 0
-        return ratio >= 3.0, ratio
+        return ratio >= 3.5, ratio   # ← Increased to 3.5x
     except:
         return False, 0
 
@@ -89,7 +91,7 @@ def analyze_order_book(exchange, symbol):
         bid_vol = sum(b[1] for b in ob.get("bids", []))
         ask_vol = sum(a[1] for a in ob.get("asks", []))
         ratio = bid_vol / ask_vol if ask_vol > 0 else 0
-        return ratio > 1.4, ratio
+        return ratio > 1.45, ratio   # ← Stronger OB filter
     except:
         return False, 0
 
@@ -118,9 +120,9 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
     score = 0
     reasons = []
     if abs(funding) > 0.00015: score += 20; reasons.append("Funding Extreme")
-    if vol_ratio >= 3.0: score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
+    if vol_ratio >= 3.5: score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
     if oi_change > 5: score += 20; reasons.append(f"OI +{oi_change:.1f}%")
-    if ob_ratio > 1.4: score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
+    if ob_ratio > 1.45: score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
     if liq_heat > 500: score += 10; reasons.append("Liquidation Pressure")
     if volume < LOW_VOLUME_BONUS_LIMIT: score += 10; reasons.append("Midcap Momentum")
     return score, reasons
@@ -131,13 +133,15 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v16</b>\nBloFin Volume Fallback Fixed")
+    send_telegram("🚀 <b>Alpha Hunter Bot v17</b>\nStricter Filters + Dedup")
 
     prev_oi = {}
+    last_alert = defaultdict(lambda: 0)   # Deduplication
 
     while True:
         print(f"\n=== SCAN STARTED {datetime.datetime.now(datetime.UTC)} ===")
         alerts_fired = 0
+        now = time.time()
 
         exchanges = {
             "MEXC": ccxt.mexc({"enableRateLimit": True, "options": {"defaultType": "swap"}}),
@@ -167,15 +171,11 @@ def bot_loop():
 
                     scanned += 1
 
-                    # === BLOFIN VOLUME FALLBACK ===
                     volume = float(ticker.get("quoteVolume") or 0)
                     if name == "BloFin" and volume == 0:
-                        volume = float(ticker.get("baseVolume") or ticker.get("volume") or 0) * 1000  # rough fallback
+                        volume = float(ticker.get("baseVolume") or 0) * 1000
 
-                    min_vol = BLOFIN_MIN_VOLUME if name == "BloFin" else MIN_VOLUME
-                    if volume < min_vol:
-                        if name == "BloFin" and scanned < 20:
-                            print(f"   [BloFin] Skipped LOW VOL: {symbol} (${volume/1e6:.2f}M)")
+                    if volume < MIN_VOLUME or volume > MAX_VOLUME:
                         continue
 
                     processed += 1
@@ -197,6 +197,11 @@ def bot_loop():
                     score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume)
 
                     if score >= ALERT_MIN_SCORE:
+                        # Deduplication
+                        if now - last_alert[symbol] < 2700:  # 45 minutes
+                            continue
+                        last_alert[symbol] = now
+
                         alerts_fired += 1
                         reason_text = "\n".join([f"• {r}" for r in reasons])
                         msg = f"""
