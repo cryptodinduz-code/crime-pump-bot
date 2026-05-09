@@ -1,17 +1,11 @@
 import ccxt
 import time
 import threading
-import requests
 from flask import Flask
 
 # =========================================================
 # CONFIG
 # =========================================================
-
-TELEGRAM_TOKEN = ""
-TELEGRAM_CHAT_ID = ""
-
-TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP = 60
 MAX_PAIRS = 120
@@ -20,20 +14,20 @@ MIN_SCORE = 60
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
 # =========================================================
-# WEB SERVER
+# SERVER
 # =========================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ALPHA ENGINE V17 ONLINE"
+    return "ALPHA ENGINE V18 FULL LIVE"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
 
 # =========================================================
-# SAFE UTIL
+# SAFE UTILS
 # =========================================================
 
 def f(x):
@@ -47,12 +41,8 @@ def f(x):
         return 0.0
 
 
-def norm_symbol(s):
-    if not s:
-        return None
-    s = str(s).upper()
-    s = s.replace(":USDT", "")
-    return s
+def safe_div(a, b):
+    return a / b if b and b != 0 else 0.0
 
 # =========================================================
 # EXCHANGES
@@ -72,10 +62,10 @@ def load(ex):
         pass
 
 # =========================================================
-# PAIR COLLECTION
+# PAIRS
 # =========================================================
 
-def get_pairs(ex, name):
+def get_pairs(ex):
 
     pairs = []
 
@@ -84,9 +74,12 @@ def get_pairs(ex, name):
 
         for s, t in tickers.items():
 
-            s = norm_symbol(s)
+            if not s:
+                continue
 
-            if not s or "/USDT" not in s:
+            s = str(s).upper().replace(":USDT", "")
+
+            if "/USDT" not in s:
                 continue
 
             base = s.split("/")[0]
@@ -111,7 +104,6 @@ def get_pairs(ex, name):
 # =========================================================
 
 def candles(ex, s):
-
     try:
         c = ex.fetch_ohlcv(s, "5m", limit=40)
         if not c or len(c) < 25:
@@ -121,7 +113,30 @@ def candles(ex, s):
         return None
 
 # =========================================================
-# FEATURES (FULL ALPHA SET)
+# FUNDING + OI (SAFE OPTIONAL LAYER)
+# =========================================================
+
+def funding(ex, symbol):
+    try:
+        if hasattr(ex, "fetch_funding_rate"):
+            fr = ex.fetch_funding_rate(symbol)
+            return f(fr.get("fundingRate"))
+    except:
+        pass
+    return 0.0
+
+
+def open_interest(ex, symbol):
+    try:
+        if hasattr(ex, "fetch_open_interest"):
+            oi = ex.fetch_open_interest(symbol)
+            return f(oi.get("openInterest") or oi.get("openInterestAmount"))
+    except:
+        pass
+    return 0.0
+
+# =========================================================
+# FEATURES
 # =========================================================
 
 def features(c):
@@ -131,23 +146,23 @@ def features(c):
     closes = [f(x[4]) for x in c]
     vols = [f(x[5]) for x in c]
 
-    # 1. COMPRESSION (pre-move squeeze)
+    # compression
     old_range = max(highs[:20]) - min(lows[:20])
     new_range = max(highs[-20:]) - min(lows[-20:])
-    comp = (old_range - new_range) / old_range if old_range > 0 else 0
+    comp = safe_div(old_range - new_range, old_range)
 
-    # 2. BREAKOUT PRESSURE (not confirmed breakout)
+    # breakout pressure
     resistance = max(highs[-15:-3])
-    brk = (closes[-1] - resistance) / resistance if resistance > 0 else 0
+    brk = safe_div(closes[-1] - resistance, resistance)
     brk = max(0, brk)
 
-    # 3. VOLUME ACCELERATION
+    # volume acceleration
     short = sum(vols[-5:]) / 5
     long = sum(vols[-20:-5]) / 15 if len(vols) > 20 else short
-    vol = (short / long - 1) if long > 0 else 0
+    vol = safe_div(short - long, long)
     vol = max(0, vol)
 
-    # 4. LIQUIDITY SWEEP PRESSURE
+    # sweep
     swp = 0
     if highs[-1] > max(highs[:-1]):
         swp += 0.5
@@ -157,20 +172,21 @@ def features(c):
     return comp, brk, vol, swp
 
 # =========================================================
-# SCORE ENGINE (STABLE DISTRIBUTION)
+# SCORE (FULL MULTI-FACTOR MODEL)
 # =========================================================
 
-def score(comp, brk, vol, swp):
+def score(comp, brk, vol, swp, fund, oi):
 
     raw = (
-        comp * 0.32 +
-        brk * 0.28 +
-        vol * 0.25 +
-        swp * 0.15
+        comp * 0.28 +
+        brk * 0.25 +
+        vol * 0.20 +
+        swp * 0.12 +
+        abs(fund) * 0.10 +
+        safe_div(oi, 1_000_000) * 0.05
     )
 
-    # smooth curve to avoid clustering
-    return max(1, min((raw ** 0.78) * 100, 100))
+    return max(1, min((raw ** 0.75) * 100, 100))
 
 # =========================================================
 # MAIN LOOP
@@ -188,7 +204,7 @@ def run():
 
             load(ex)
 
-            pairs = get_pairs(ex, name)
+            pairs = get_pairs(ex)
 
             print(f"{name} pairs: {len(pairs)}")
 
@@ -200,9 +216,16 @@ def run():
 
                 comp, brk, volx, swp = features(c)
 
-                sc = score(comp, brk, volx, swp)
+                fund = funding(ex, s)
+                oi = open_interest(ex, s)
 
-                print(f"{s} | score={sc:.1f} | c={comp:.2f} b={brk:.2f} v={volx:.2f} s={swp:.2f}")
+                sc = score(comp, brk, volx, swp, fund, oi)
+
+                print(
+                    f"{s} | score={sc:.1f} | "
+                    f"c={comp:.2f} b={brk:.2f} v={volx:.2f} s={swp:.2f} "
+                    f"f={fund:.4f} oi={oi:.0f}"
+                )
 
                 if sc >= MIN_SCORE:
                     print("🚨 SIGNAL:", s, sc)
