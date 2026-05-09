@@ -14,9 +14,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP = 60
-MIN_SCORE = 0.65   # normalized score (0–1 system)
-
-MAX_PAIRS = 250
+MAX_PAIRS = 200
+MIN_ALERT = 68
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
@@ -28,7 +27,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "BALANCED ALPHA ENGINE V8"
+    return "CRIME ENGINE V12"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
@@ -68,96 +67,101 @@ def exchanges():
     return {
         "MEXC": ccxt.mexc({"enableRateLimit": True}),
         "BloFin": ccxt.blofin({"enableRateLimit": True}),
-        "Binance": ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"}
-        })
+        "Binance": ccxt.binance({"enableRateLimit": True})
     }
 
 # =========================================================
 # CANDLES
 # =========================================================
 
-def candles(ex, s, tf="5m", n=40):
+def candles(ex, s, tf="5m", n=30):
     try:
         c = ex.fetch_ohlcv(s, tf, limit=n)
-        return c if len(c) > 20 else None
+        return c if len(c) > 15 else None
     except:
         return None
 
 # =========================================================
-# 1. REGIME (SOFT CLASSIFICATION)
+# VOLATILITY NORMALIZER (IMPORTANT FIX)
+# =========================================================
+
+def vol_norm(c):
+    highs = [f(x[2]) for x in c]
+    lows = [f(x[3]) for x in c]
+
+    price = f(c[-1][4])
+    if price == 0:
+        return 1
+
+    range_ = max(highs) - min(lows)
+    return range_ / price
+
+# =========================================================
+# REGIME
 # =========================================================
 
 def regime(ex, s):
-    c = candles(ex, s, "15m", 40)
+    c = candles(ex, s, "15m", 30)
     if not c:
-        return "none"
+        return 0.4
 
     closes = [f(x[4]) for x in c]
-    highs = [f(x[2]) for x in c]
-    lows = [f(x[3]) for x in c]
 
-    trend_up = closes[-1] > closes[-5] > closes[-10]
-
-    range_now = max(highs[-10:]) - min(lows[-10:])
-    range_prev = max(highs[-20:-10]) - min(lows[-20:-10])
-
-    compression = range_prev > 0 and range_prev / max(range_now, 1) > 1.8
-
-    if trend_up:
-        return "trend"
-    if compression:
-        return "compression"
-    return "neutral"
+    trend = closes[-1] > closes[-5] > closes[-10]
+    return 0.65 if trend else 0.35
 
 # =========================================================
-# 2. NORMALIZED METRICS (0–1)
+# COMPRESSION (DE-BIASED)
 # =========================================================
 
-def compression_score(ex, s):
-    c = candles(ex, s, "5m", 40)
+def compression(ex, s):
+    c = candles(ex, s)
     if not c:
         return 0
 
     highs = [f(x[2]) for x in c]
     lows = [f(x[3]) for x in c]
 
-    old_range = max(highs[:20]) - min(lows[:20])
-    new_range = max(highs[-20:]) - min(lows[-20:])
+    old = max(highs[:15]) - min(lows[:15])
+    new = max(highs[-15:]) - min(lows[-15:])
 
-    if new_range == 0:
+    if new <= 0:
         return 0
 
-    ratio = old_range / new_range
+    ratio = old / new
 
-    return min(ratio / 5, 1)  # normalized 0–1
+    return min((ratio - 1) / 4, 1)
 
 # =========================================================
-# 3. BREAKOUT (0–1)
+# BREAKOUT (CONFIRMED, NOT ASSUMED)
 # =========================================================
 
-def breakout_score(ex, s):
-    c = candles(ex, s, "5m", 20)
+def breakout(ex, s):
+    c = candles(ex, s)
     if not c:
         return 0
 
     closes = [f(x[4]) for x in c]
     highs = [f(x[2]) for x in c]
+    vols = [f(x[5]) for x in c]
 
-    resistance = max(highs[-15:-1])
+    resistance = max(highs[-12:-2])
 
-    if closes[-1] > resistance:
-        return 1
+    broke = closes[-1] > resistance
+    follow_through = closes[-1] > closes[-2]
+    vol_ok = vols[-1] > (sum(vols[-6:-1]) / 5)
+
+    if broke and follow_through and vol_ok:
+        return 0.85
 
     return 0
 
 # =========================================================
-# 4. VOLUME EXPANSION (0–1)
+# VOLUME (CONDITIONAL IMPORTANCE)
 # =========================================================
 
-def volume_score(ex, s):
-    c = candles(ex, s, "5m", 15)
+def volume(ex, s, breakout_active):
+    c = candles(ex, s)
     if not c:
         return 0
 
@@ -169,14 +173,20 @@ def volume_score(ex, s):
 
     spike = vols[-1] / avg
 
-    return min(spike / 5, 1)
+    base = min((spike - 1) / 5, 1)
+
+    # reduce importance if breakout already exists (fix double count)
+    if breakout_active:
+        base *= 0.6
+
+    return base
 
 # =========================================================
-# 5. LIQUIDITY SWEEP (0–1)
+# LIQUIDITY SWEEP (CONTEXTUAL)
 # =========================================================
 
-def sweep_score(ex, s):
-    c = candles(ex, s, "5m", 10)
+def sweep(ex, s):
+    c = candles(ex, s)
     if not c:
         return 0
 
@@ -186,51 +196,30 @@ def sweep_score(ex, s):
     last = c[-1]
     h, l, cl = f(last[2]), f(last[3]), f(last[4])
 
-    if h > max(highs) and cl < h:
-        return 1
+    sweep_up = h > max(highs) and cl < h
+    sweep_down = l < min(lows) and cl > l
 
-    if l < min(lows) and cl > l:
-        return 1
-
-    return 0
+    return 1 if (sweep_up or sweep_down) else 0
 
 # =========================================================
-# 6. FINAL SCORE (BALANCED WEIGHTS)
+# FINAL SCORE (CALIBRATED MODEL)
 # =========================================================
 
-def final_score(reg, comp, brk, vol, sweep):
+def score(reg, comp, brk, vol, swp, vol_norm_factor):
 
-    # HARD FILTER (must have event)
-    if brk == 0 and sweep == 0 and vol < 0.4:
-        return 0, []
+    # volatility adjustment (IMPORTANT FIX)
+    vol_factor = 1 / (1 + vol_norm_factor * 10)
 
-    reasons = []
+    raw =
+        comp * 0.22 +
+        brk * 0.32 +
+        vol * 0.20 +
+        swp * 0.16 +
+        reg * 0.10
 
-    score = 0
+    adjusted = raw * vol_factor
 
-    # weights balanced (no domination)
-    score += comp * 0.25
-    score += brk * 0.30
-    score += vol * 0.25
-    score += sweep * 0.20
-
-    if reg == "trend":
-        score *= 1.1
-        reasons.append("Trend context")
-
-    if reg == "compression":
-        reasons.append("Compression buildup")
-
-    if brk:
-        reasons.append("Breakout confirmed")
-
-    if sweep:
-        reasons.append("Liquidity sweep detected")
-
-    if vol > 0.6:
-        reasons.append("Volume expansion")
-
-    return min(score, 1), reasons
+    return max(1, min(adjusted * 100, 100))
 
 # =========================================================
 # MAIN LOOP
@@ -238,7 +227,7 @@ def final_score(reg, comp, brk, vol, sweep):
 
 def run():
 
-    tg("🚀 BALANCED ALPHA ENGINE V8 STARTED")
+    tg("🚀 CRIME ENGINE V12 LIVE")
 
     while True:
 
@@ -281,35 +270,38 @@ def run():
 
                 for s, vol in universe:
 
+                    c = candles(ex, s)
+                    if not c:
+                        continue
+
+                    vnorm = vol_norm(c)
+
                     reg = regime(ex, s)
+                    comp = compression(ex, s)
 
-                    comp = compression_score(ex, s)
-                    brk = breakout_score(ex, s)
-                    volx = volume_score(ex, s)
-                    sweep = sweep_score(ex, s)
+                    brk = breakout(ex, s)
+                    volx = volume(ex, s, brk > 0)
+                    swp = sweep(ex, s)
 
-                    sc, reasons = final_score(reg, comp, brk, volx, sweep)
+                    sc = score(reg, comp, brk, volx, swp, vnorm)
 
-                    print(f"{s} | score={sc:.2f} | {reg}")
+                    print(f"{s} | crime={sc:.1f}")
 
-                    if sc < MIN_SCORE:
+                    if sc < MIN_ALERT:
                         continue
 
                     msg = f"""
-🚨 {name} BALANCED SIGNAL
+🚨 CRIME SIGNAL V12
 
 {s}
-Score: {sc:.2f}
-Regime: {reg}
+Crime Score: {sc:.1f}/100
 
-STRENGTHS:
-• """ + "\n• ".join(reasons) + f"""
-
-Metrics (normalized):
-Compression: {comp:.2f}
-Breakout: {brk}
-Volume: {volx:.2f}
-Sweep: {sweep}
+Breakdown:
+• Regime: {reg:.2f}
+• Compression: {comp:.2f}
+• Breakout: {brk:.2f}
+• Volume: {volx:.2f}
+• Sweep: {swp}
 """
 
                     tg(msg)
