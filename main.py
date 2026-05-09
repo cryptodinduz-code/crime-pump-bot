@@ -7,27 +7,27 @@ from flask import Flask
 # CONFIG
 # =========================================================
 
-LOOP_SECONDS = 60
+LOOP = 60
 MAX_PAIRS = 120
 MIN_SCORE = 60
 
 MAJORS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"}
 
 # =========================================================
-# WEB SERVER (KEEP ALIVE)
+# SERVER
 # =========================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ALPHA ENGINE V20 ONLINE"
+    return "ALPHA ENGINE V23 FULL PRESERVE LIVE"
 
 def run_web():
     app.run("0.0.0.0", 8080, use_reloader=False)
 
 # =========================================================
-# SAFE NUMERIC CORE (CRITICAL)
+# SAFE MATH CORE (NO FEATURE LOSS)
 # =========================================================
 
 def f(x):
@@ -37,21 +37,21 @@ def f(x):
         if isinstance(x, complex):
             return float(x.real)
         x = float(x)
-        if x != x:  # NaN check
+        if x != x:
             return 0.0
         return x
     except:
         return 0.0
 
 
-def clamp(x, mn=0.0, mx=10.0):
+def clamp(x, a=0.0, b=10.0):
     x = f(x)
-    return max(mn, min(mx, x))
+    return max(a, min(b, x))
 
 
 def safe_div(a, b):
     a, b = f(a), f(b)
-    return a / b if b != 0 else 0.0
+    return a / b if b else 0.0
 
 # =========================================================
 # EXCHANGES
@@ -96,7 +96,6 @@ def get_pairs(ex):
                 continue
 
             vol = f(t.get("quoteVolume") or t.get("baseVolume"))
-
             if vol <= 0:
                 continue
 
@@ -114,7 +113,6 @@ def get_pairs(ex):
 # =========================================================
 
 def candles(ex, s):
-
     try:
         c = ex.fetch_ohlcv(s, "5m", limit=40)
         if not c or len(c) < 25:
@@ -124,7 +122,7 @@ def candles(ex, s):
         return None
 
 # =========================================================
-# FUNDING / OI (SAFE OPTIONAL)
+# FUNDING + OI (PRESERVED, SAFE)
 # =========================================================
 
 def funding(ex, s):
@@ -147,7 +145,7 @@ def open_interest(ex, s):
     return 0.0
 
 # =========================================================
-# FEATURES (ALPHA CORE)
+# FEATURES (ALL FEATURES PRESERVED)
 # =========================================================
 
 def features(c):
@@ -157,33 +155,48 @@ def features(c):
     closes = [f(x[4]) for x in c]
     vols = [f(x[5]) for x in c]
 
-    # compression (pre-move squeeze)
+    # ---------------------------
+    # 1. COMPRESSION (PRESERVED)
+    # ---------------------------
     old_range = max(highs[:20]) - min(lows[:20])
     new_range = max(highs[-20:]) - min(lows[-20:])
-    comp = clamp(safe_div(old_range - new_range, old_range))
 
-    # breakout pressure
-    resistance = max(highs[-15:-3])
-    brk = clamp(safe_div(closes[-1] - resistance, resistance))
-    brk = max(0.0, brk)
+    comp = 0.0
+    if old_range > 0:
+        comp = 1 - (new_range / old_range)
+        comp = max(0.0, min(comp * 3.0, 1.0))
 
-    # volume acceleration
+    # ---------------------------
+    # 2. BREAKOUT PRESSURE (PRESERVED)
+    # ---------------------------
+    resistance = max(highs[-20:-3])
+    move = safe_div(closes[-1] - resistance, resistance)
+    brk = max(0.0, min(move * 10, 1.0))
+
+    # ---------------------------
+    # 3. VOLUME ACCELERATION (PRESERVED)
+    # ---------------------------
     short = sum(vols[-5:]) / 5
     long = sum(vols[-20:-5]) / 15 if len(vols) > 20 else short
-    vol = clamp(safe_div(short - long, long))
-    vol = max(0.0, vol)
 
-    # sweep detection
+    vol = 0.0
+    if long > 0:
+        vol = (short / long - 1)
+        vol = max(0.0, min(vol * 2.0, 1.0))
+
+    # ---------------------------
+    # 4. LIQUIDITY SWEEP (PRESERVED)
+    # ---------------------------
     swp = 0.0
-    if highs[-1] > max(highs[:-1]):
+    if highs[-1] >= max(highs[:-1]):
         swp += 0.5
-    if lows[-1] < min(lows[:-1]):
+    if lows[-1] <= min(lows[:-1]):
         swp += 0.5
 
     return comp, brk, vol, swp
 
 # =========================================================
-# SCORE ENGINE (STABLE 1–100)
+# SCORE (REBALANCED, NO FEATURE LOSS)
 # =========================================================
 
 def score(comp, brk, vol, swp, fund, oi):
@@ -192,11 +205,12 @@ def score(comp, brk, vol, swp, fund, oi):
         comp * 0.30 +
         brk * 0.25 +
         vol * 0.20 +
-        swp * 0.15 +
-        abs(f(fund)) * 0.05 +
+        swp * 0.10 +
+        abs(f(fund)) * 0.10 +
         clamp(oi / 1_000_000) * 0.05
     )
 
+    # keep full sensitivity but stable distribution
     raw = max(0.0, min(raw, 2.0))
 
     return max(1, min(raw * 50, 100))
@@ -244,7 +258,7 @@ def run():
                     print("🚨 SIGNAL:", s, sc)
 
         print("SCAN COMPLETE\n")
-        time.sleep(LOOP_SECONDS)
+        time.sleep(LOOP)
 
 # =========================================================
 # START
