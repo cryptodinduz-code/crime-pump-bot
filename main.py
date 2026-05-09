@@ -21,17 +21,20 @@ ALERT_MIN_SCORE = 60
 
 MAX_PAIRS_PER_EXCHANGE = 400
 
-MIN_VOLUME = 6_000_000      # New minimum
-MAX_VOLUME = 150_000_000    # New maximum
+MIN_VOLUME = 6_000_000
+MAX_VOLUME = 150_000_000
 BLOFIN_MIN_VOLUME = 2_000_000
 
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
-# Filters
+# STOCK + COMMODITY FILTER (updated)
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
-                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK", "MUSTOCK", "STOCK"]
+                  "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK", "MUSTOCK", "STOCK",
+                  "USOIL", "UKOIL", "US30", "SPX500", "NAS100", "XAUT", "PAXG", "SILVER"]
 
+# MAJOR PAIRS FILTER
 MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
+
 
 # =========================================================
 # FLASK + TELEGRAM
@@ -69,7 +72,7 @@ def get_volume_spike(exchange, symbol):
         volumes = [c[5] for c in candles if c[5] is not None]
         avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 0
         ratio = volumes[-1] / avg if avg > 0 else 0
-        return ratio >= 3.5, ratio   # ← Increased to 3.5x
+        return ratio >= 3.5, ratio
     except:
         return False, 0
 
@@ -91,7 +94,7 @@ def analyze_order_book(exchange, symbol):
         bid_vol = sum(b[1] for b in ob.get("bids", []))
         ask_vol = sum(a[1] for a in ob.get("asks", []))
         ratio = bid_vol / ask_vol if ask_vol > 0 else 0
-        return ratio > 1.45, ratio   # ← Stronger OB filter
+        return ratio > 1.45, ratio
     except:
         return False, 0
 
@@ -133,10 +136,10 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v17</b>\nStricter Filters + Dedup")
+    send_telegram("🚀 <b>Alpha Hunter Bot v18</b>\nStricter + Stock Filter Updated")
 
     prev_oi = {}
-    last_alert = defaultdict(lambda: 0)   # Deduplication
+    last_alert = defaultdict(lambda: 0)
 
     while True:
         print(f"\n=== SCAN STARTED {datetime.datetime.now(datetime.UTC)} ===")
@@ -197,8 +200,7 @@ def bot_loop():
                     score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume)
 
                     if score >= ALERT_MIN_SCORE:
-                        # Deduplication
-                        if now - last_alert[symbol] < 2700:  # 45 minutes
+                        if now - last_alert[symbol] < 2700:  # 45 minutes dedup
                             continue
                         last_alert[symbol] = now
 
