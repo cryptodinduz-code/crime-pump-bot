@@ -20,11 +20,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TG_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 LOOP_SECONDS = 60
-ALERT_MIN_SCORE = 68          # lowered a bit for early movers
+ALERT_MIN_SCORE = 65
 
 MAX_PAIRS_PER_EXCHANGE = 400
 
-MIN_VOLUME = 6_000_000
+MIN_VOLUME = 5_000_000
 MAX_VOLUME = 150_000_000
 
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
@@ -87,7 +87,7 @@ def generate_1h_chart(exchange, symbol, last_price):
 
 
 # =========================================================
-# HELPERS (tuned for early detection like BILL)
+# HELPERS
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -147,7 +147,7 @@ def detect_accumulation(candles):
         recent_vol = sum(c[5] for c in candles[-6:]) / 6
         older_vol = sum(c[5] for c in candles[-12:-6]) / 6
         vol_creep = recent_vol / older_vol if older_vol > 0 else 0
-        return min(max((vol_creep - 1.15) * 18, 0), 18)   # tuned for early like BILL
+        return min(max((vol_creep - 1.12) * 20, 0), 20)
     except:
         return 0
 
@@ -158,7 +158,7 @@ def detect_liquidity_compression(candles):
         avg_range = sum(ranges) / len(ranges)
         latest_range = ranges[-1]
         compression = 1 - (latest_range / avg_range) if avg_range > 0 else 0
-        return min(max(compression * 14, 0), 14)   # tuned
+        return min(max(compression * 16, 0), 16)
     except:
         return 0
 
@@ -168,6 +168,7 @@ def detect_fakeout_risk(vol_ratio, ob_ratio, funding):
     if abs(funding) > 0.0005 and vol_ratio < 2.5: risk += 12
     return risk
 
+
 def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, candles=None):
     score = 0
     reasons = []
@@ -176,14 +177,14 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, c
     if vol_ratio >= 3.5: score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
     if oi_change > 8: score += 18; reasons.append(f"OI Surge +{oi_change:.1f}%")
     if ob_ratio > 1.45: score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
-    if liq_heat > 600: score += 10; reasons.append("Liquidation Pressure")
+    if liq_heat > 500: score += 10; reasons.append("Liquidation Pressure")
     if volume < LOW_VOLUME_BONUS_LIMIT: score += 8; reasons.append("Midcap Momentum")
 
     if candles:
         acc = detect_accumulation(candles)
-        if acc > 8: score += acc; reasons.append("Accumulation Building")
+        if acc > 7: score += acc; reasons.append("Accumulation Building")
         comp = detect_liquidity_compression(candles)
-        if comp > 7: score += comp; reasons.append("Liquidity Compression")
+        if comp > 6: score += comp; reasons.append("Liquidity Compression")
 
     fake_penalty = detect_fakeout_risk(vol_ratio, ob_ratio, funding)
     score = max(20, score - fake_penalty)
@@ -193,11 +194,11 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, c
 
 
 # =========================================================
-# MAIN LOOP
+# MAIN LOOP - FULL RICH STATS RESTORED
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v23</b>\nTuned for Early Moves like BILL")
+    send_telegram("🚀 <b>Alpha Hunter Bot v25 FULL</b>\nAll features restored + Early Detection")
 
     prev_oi = {}
     last_alert = defaultdict(lambda: 0)
@@ -256,6 +257,11 @@ def bot_loop():
 
                     score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, candles)
 
+                    # FULL RICH STATS (this was missing in the last version you saw)
+                    print(f"✅ {name} | {symbol} | Vol=${volume/1e6:.2f}M | Funding={funding:.5f} | "
+                          f"Spike={vol_ratio:.2f}x | OI={oi_change:.2f}% | OB={ob_ratio:.2f} | "
+                          f"Liq={liq_heat:.1f} | Score={score}")
+
                     if score >= ALERT_MIN_SCORE:
                         if now - last_alert[symbol] < 2700: continue
                         last_alert[symbol] = now
@@ -285,7 +291,7 @@ def bot_loop():
                         """
 
                         send_telegram(msg, chart_path)
-                        print(f"🚨 SIGNAL → {symbol} | Score: {score}")
+                        print(f"🚨 SIGNAL SENT → {symbol} | Score: {score}")
 
                 print(f"  → {name}: Scanned {scanned} | Processed {processed}")
 
