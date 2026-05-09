@@ -21,7 +21,7 @@ ALERT_MIN_SCORE = 60
 MAX_PAIRS_PER_EXCHANGE = 400
 
 MIN_VOLUME = 3_000_000
-BLOFIN_MIN_VOLUME = 1_000_000
+BLOFIN_MIN_VOLUME = 500_000   # relaxed for BloFin
 
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
@@ -32,7 +32,7 @@ MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "
 
 
 # =========================================================
-# FLASK + TELEGRAM
+# FLASK
 # =========================================================
 
 app = Flask(__name__)
@@ -45,19 +45,28 @@ def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
 def send_telegram(text):
-    if not TG_ENABLED: return
+    if not TG_ENABLED:
+        print("Telegram disabled")
+        return
     try:
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
-    except: pass
+        print(f"Telegram: {response.status_code}")
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 
 # =========================================================
-# HELPERS (all previous features kept)
+# HELPERS - ALL PREVIOUS FEATURES
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -117,12 +126,24 @@ def get_funding(exchange, symbol):
 def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
     score = 0
     reasons = []
-    if abs(funding) > 0.00015: score += 20; reasons.append("Funding Extreme")
-    if vol_ratio >= 3.0: score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
-    if oi_change > 5: score += 20; reasons.append(f"OI +{oi_change:.1f}%")
-    if ob_ratio > 1.4: score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
-    if liq_heat > 500: score += 10; reasons.append("Liquidation Pressure")
-    if volume < LOW_VOLUME_BONUS_LIMIT: score += 10; reasons.append("Midcap Momentum")
+    if abs(funding) > 0.00015:
+        score += 20
+        reasons.append("Funding Extreme")
+    if vol_ratio >= 3.0:
+        score += 25
+        reasons.append(f"Volume Spike {vol_ratio:.1f}x")
+    if oi_change > 5:
+        score += 20
+        reasons.append(f"OI +{oi_change:.1f}%")
+    if ob_ratio > 1.4:
+        score += 15
+        reasons.append(f"Buy Pressure {ob_ratio:.2f}")
+    if liq_heat > 500:
+        score += 10
+        reasons.append("Liquidation Pressure")
+    if volume < LOW_VOLUME_BONUS_LIMIT:
+        score += 10
+        reasons.append("Midcap Momentum")
     return score, reasons
 
 
@@ -131,12 +152,12 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v14</b>\nBloFin Debug Mode")
+    send_telegram("🚀 <b>Alpha Hunter Bot v15</b>\nFull Features + BloFin Debug")
 
     prev_oi = {}
 
     while True:
-        print(f"\n=== SCAN STARTED {datetime.datetime.utcnow()} ===")
+        print(f"\n=== SCAN STARTED {datetime.datetime.now(datetime.UTC)} ===")
         alerts_fired = 0
 
         exchanges = {
@@ -160,23 +181,17 @@ def bot_loop():
                 for symbol, ticker in sorted_tickers:
                     if scanned >= MAX_PAIRS_PER_EXCHANGE:
                         break
-
                     if "USDT" not in symbol:
                         continue
 
                     upper = symbol.upper()
-
-                    # Debug skip reasons
                     if any(k in upper for k in STOCK_KEYWORDS):
                         if name == "BloFin" and scanned < 10:
                             print(f"   [BloFin] Skipped STOCK: {symbol}")
                         continue
 
-                    if any(m in upper for m in MAJOR_PAIRS):
-                        if name == "BloFin" and scanned < 20:
-                            print(f"   [BloFin] Skipped MAJOR: {symbol}")
-                        if name == "MEXC":  # only skip majors on MEXC
-                            continue
+                    if any(m in upper for m in MAJOR_PAIRS) and name == "MEXC":
+                        continue
 
                     scanned += 1
 
@@ -191,30 +206,51 @@ def bot_loop():
                     processed += 1
 
                     last_price = ticker.get("last") or 0
-
                     funding = get_funding(ex, symbol)
                     _, vol_ratio = get_volume_spike(ex, symbol)
                     oi_change = get_open_interest_change(ex, symbol, prev_oi)
                     _, ob_ratio = analyze_order_book(ex, symbol)
                     liq_heat = get_liq_heat(ex, symbol)
 
-                    print(f"✅ {name} | {symbol} | Vol=${volume/1e6:.2f}M | Spike={vol_ratio:.1f}x | Fund={funding:.5f}")
+                    print(
+                        f"✅ {name} | {symbol} | "
+                        f"Vol=${volume/1e6:.2f}M | Funding={funding:.5f} | "
+                        f"Spike={vol_ratio:.2f}x | OI={oi_change:.2f}% | "
+                        f"OB={ob_ratio:.2f} | Liq={liq_heat:.1f}"
+                    )
 
                     score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume)
 
                     if score >= ALERT_MIN_SCORE:
                         alerts_fired += 1
                         reason_text = "\n".join([f"• {r}" for r in reasons])
-                        msg = f"🚨 <b>ALPHA SIGNAL</b>\n🔥 {symbol} on {name}\nScore: <b>{score}</b>\n{reason_text}"
+                        msg = f"""
+🚨 <b>ALPHA SIGNAL</b>
+
+🔥 <b>{symbol}</b>
+🏦 Exchange: {name}
+
+💰 Price: ${last_price:.6g}
+📊 Volume: ${volume / 1e6:.2f}M
+
+📈 Funding: {funding*100:+.4f}%
+📦 OI: {oi_change:+.2f}%
+📚 OB: {ob_ratio:.2f}
+⚡ Spike: {vol_ratio:.2f}x
+🎯 Score: <b>{score}/100</b>
+
+{reason_text}
+"""
                         print(msg)
                         send_telegram(msg)
+                        time.sleep(1)
 
                 print(f"  → {name}: Scanned {scanned} | Processed {processed}")
 
             except Exception as e:
                 print(f"❌ {name} ERROR: {e}")
 
-        print(f"\n✅ Scan done | Total alerts: {alerts_fired}")
+        print(f"\n✅ Scan completed | Alerts fired: {alerts_fired}\n")
         time.sleep(LOOP_SECONDS)
 
 
