@@ -21,7 +21,7 @@ ALERT_MIN_SCORE = 60
 MAX_PAIRS_PER_EXCHANGE = 400
 
 MIN_VOLUME = 3_000_000
-BLOFIN_MIN_VOLUME = 500_000   # relaxed for BloFin
+BLOFIN_MIN_VOLUME = 800_000   # relaxed
 
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
@@ -32,7 +32,7 @@ MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "
 
 
 # =========================================================
-# FLASK
+# FLASK + TELEGRAM
 # =========================================================
 
 app = Flask(__name__)
@@ -45,28 +45,19 @@ def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-
-# =========================================================
-# TELEGRAM
-# =========================================================
-
 def send_telegram(text):
-    if not TG_ENABLED:
-        print("Telegram disabled")
-        return
+    if not TG_ENABLED: return
     try:
-        response = requests.post(
+        requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
-        print(f"Telegram: {response.status_code}")
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    except: pass
 
 
 # =========================================================
-# HELPERS - ALL PREVIOUS FEATURES
+# HELPERS (ALL PREVIOUS FEATURES)
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -126,24 +117,12 @@ def get_funding(exchange, symbol):
 def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
     score = 0
     reasons = []
-    if abs(funding) > 0.00015:
-        score += 20
-        reasons.append("Funding Extreme")
-    if vol_ratio >= 3.0:
-        score += 25
-        reasons.append(f"Volume Spike {vol_ratio:.1f}x")
-    if oi_change > 5:
-        score += 20
-        reasons.append(f"OI +{oi_change:.1f}%")
-    if ob_ratio > 1.4:
-        score += 15
-        reasons.append(f"Buy Pressure {ob_ratio:.2f}")
-    if liq_heat > 500:
-        score += 10
-        reasons.append("Liquidation Pressure")
-    if volume < LOW_VOLUME_BONUS_LIMIT:
-        score += 10
-        reasons.append("Midcap Momentum")
+    if abs(funding) > 0.00015: score += 20; reasons.append("Funding Extreme")
+    if vol_ratio >= 3.0: score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
+    if oi_change > 5: score += 20; reasons.append(f"OI +{oi_change:.1f}%")
+    if ob_ratio > 1.4: score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
+    if liq_heat > 500: score += 10; reasons.append("Liquidation Pressure")
+    if volume < LOW_VOLUME_BONUS_LIMIT: score += 10; reasons.append("Midcap Momentum")
     return score, reasons
 
 
@@ -152,7 +131,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v15</b>\nFull Features + BloFin Debug")
+    send_telegram("🚀 <b>Alpha Hunter Bot v16</b>\nBloFin Volume Fallback Fixed")
 
     prev_oi = {}
 
@@ -179,27 +158,23 @@ def bot_loop():
                 processed = 0
 
                 for symbol, ticker in sorted_tickers:
-                    if scanned >= MAX_PAIRS_PER_EXCHANGE:
-                        break
-                    if "USDT" not in symbol:
-                        continue
+                    if scanned >= MAX_PAIRS_PER_EXCHANGE: break
+                    if "USDT" not in symbol: continue
 
                     upper = symbol.upper()
-                    if any(k in upper for k in STOCK_KEYWORDS):
-                        if name == "BloFin" and scanned < 10:
-                            print(f"   [BloFin] Skipped STOCK: {symbol}")
-                        continue
-
-                    if any(m in upper for m in MAJOR_PAIRS) and name == "MEXC":
-                        continue
+                    if any(k in upper for k in STOCK_KEYWORDS): continue
+                    if any(m in upper for m in MAJOR_PAIRS) and name == "MEXC": continue
 
                     scanned += 1
 
+                    # === BLOFIN VOLUME FALLBACK ===
                     volume = float(ticker.get("quoteVolume") or 0)
-                    min_vol = BLOFIN_MIN_VOLUME if name == "BloFin" else MIN_VOLUME
+                    if name == "BloFin" and volume == 0:
+                        volume = float(ticker.get("baseVolume") or ticker.get("volume") or 0) * 1000  # rough fallback
 
+                    min_vol = BLOFIN_MIN_VOLUME if name == "BloFin" else MIN_VOLUME
                     if volume < min_vol:
-                        if name == "BloFin" and scanned < 30:
+                        if name == "BloFin" and scanned < 20:
                             print(f"   [BloFin] Skipped LOW VOL: {symbol} (${volume/1e6:.2f}M)")
                         continue
 
@@ -234,9 +209,10 @@ def bot_loop():
 📊 Volume: ${volume / 1e6:.2f}M
 
 📈 Funding: {funding*100:+.4f}%
-📦 OI: {oi_change:+.2f}%
-📚 OB: {ob_ratio:.2f}
-⚡ Spike: {vol_ratio:.2f}x
+📦 OI Change: {oi_change:+.2f}%
+📚 Orderbook: {ob_ratio:.2f}
+⚡ Volume Spike: {vol_ratio:.2f}x
+
 🎯 Score: <b>{score}/100</b>
 
 {reason_text}
