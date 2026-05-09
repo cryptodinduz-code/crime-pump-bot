@@ -27,12 +27,10 @@ BLOFIN_MIN_VOLUME = 2_000_000
 
 LOW_VOLUME_BONUS_LIMIT = 30_000_000
 
-# STOCK + COMMODITY FILTER (updated)
 STOCK_KEYWORDS = ["AMD", "NVDA", "NVIDIA", "TSLA", "AAPL", "META", "AMZN", "GOOGL", "MSFT", "NFLX", 
                   "AMDSTOCK", "NVIDIASTOCK", "SNDKSTOCK", "IRENSTOCK", "MUSTOCK", "STOCK",
                   "USOIL", "UKOIL", "US30", "SPX500", "NAS100", "XAUT", "PAXG", "SILVER"]
 
-# MAJOR PAIRS FILTER
 MAJOR_PAIRS = ["BTC", "ETH", "SOL", "BNB", "XRP", "TON", "ADA", "AVAX", "TRX", "SHIB"]
 
 
@@ -62,7 +60,7 @@ def send_telegram(text):
 
 
 # =========================================================
-# HELPERS (All previous features kept)
+# HELPERS
 # =========================================================
 
 def get_volume_spike(exchange, symbol):
@@ -118,16 +116,74 @@ def get_funding(exchange, symbol):
     except:
         return 0
 
+# Smart Early Detection (reduced weight)
+def detect_accumulation(candles):
+    try:
+        if len(candles) < 12: return 0
+        recent_vol = sum(c[5] for c in candles[-6:]) / 6
+        older_vol = sum(c[5] for c in candles[-12:-6]) / 6
+        vol_creep = recent_vol / older_vol if older_vol > 0 else 0
+        return min(max((vol_creep - 1.0) * 18, 0), 18)   # Reduced
+    except:
+        return 0
 
-def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
+def detect_liquidity_compression(candles):
+    try:
+        if len(candles) < 8: return 0
+        ranges = [(c[2] - c[3]) / c[4] for c in candles[-8:] if c[4] != 0]
+        avg_range = sum(ranges) / len(ranges)
+        latest_range = ranges[-1]
+        compression = 1 - (latest_range / avg_range) if avg_range > 0 else 0
+        return min(max(compression * 15, 0), 15)   # Reduced
+    except:
+        return 0
+
+def detect_fakeout_risk(vol_ratio, ob_ratio, funding):
+    risk = 0
+    if vol_ratio > 5.0 and ob_ratio < 1.3: risk += 18
+    if abs(funding) > 0.0005 and vol_ratio < 2.5: risk += 12
+    return risk
+
+# =========================================================
+# SCORING ENGINE (capped at 100)
+# =========================================================
+
+def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, candles=None):
     score = 0
     reasons = []
-    if abs(funding) > 0.00015: score += 20; reasons.append("Funding Extreme")
-    if vol_ratio >= 3.5: score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
-    if oi_change > 5: score += 20; reasons.append(f"OI +{oi_change:.1f}%")
-    if ob_ratio > 1.45: score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
-    if liq_heat > 500: score += 10; reasons.append("Liquidation Pressure")
-    if volume < LOW_VOLUME_BONUS_LIMIT: score += 10; reasons.append("Midcap Momentum")
+
+    if abs(funding) > 0.00015:
+        score += 20; reasons.append("Funding Extreme")
+    if vol_ratio >= 3.5:
+        score += 25; reasons.append(f"Volume Spike {vol_ratio:.1f}x")
+    if oi_change > 8:
+        score += 18; reasons.append(f"OI Surge +{oi_change:.1f}%")
+    if ob_ratio > 1.45:
+        score += 15; reasons.append(f"Buy Pressure {ob_ratio:.2f}")
+    if liq_heat > 500:
+        score += 10; reasons.append("Liquidation Pressure")
+    if volume < LOW_VOLUME_BONUS_LIMIT:
+        score += 10; reasons.append("Midcap Momentum")
+
+    # Smart signals (reduced weight)
+    if candles:
+        acc = detect_accumulation(candles)
+        if acc > 8:
+            score += acc
+            reasons.append("Accumulation Building")
+
+        comp = detect_liquidity_compression(candles)
+        if comp > 7:
+            score += comp
+            reasons.append("Liquidity Compression")
+
+    # Fakeout penalty
+    fake_penalty = detect_fakeout_risk(vol_ratio, ob_ratio, funding)
+    score = max(15, score - fake_penalty)
+
+    # Hard cap at 100
+    score = min(int(score), 100)
+
     return score, reasons
 
 
@@ -136,7 +192,7 @@ def calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume):
 # =========================================================
 
 def bot_loop():
-    send_telegram("🚀 <b>Alpha Hunter Bot v18</b>\nStricter + Stock Filter Updated")
+    send_telegram("🚀 <b>Alpha Hunter Bot v20</b>\nSmart Early Detection + Cap 100")
 
     prev_oi = {}
     last_alert = defaultdict(lambda: 0)
@@ -190,17 +246,19 @@ def bot_loop():
                     _, ob_ratio = analyze_order_book(ex, symbol)
                     liq_heat = get_liq_heat(ex, symbol)
 
+                    try:
+                        candles = ex.fetch_ohlcv(symbol, "5m", limit=12)
+                    except:
+                        candles = None
+
+                    score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume, candles)
+
                     print(
-                        f"✅ {name} | {symbol} | "
-                        f"Vol=${volume/1e6:.2f}M | Funding={funding:.5f} | "
-                        f"Spike={vol_ratio:.2f}x | OI={oi_change:.2f}% | "
-                        f"OB={ob_ratio:.2f} | Liq={liq_heat:.1f}"
+                        f"✅ {name} | {symbol} | Vol=${volume/1e6:.2f}M | Spike={vol_ratio:.2f}x | Score={score}"
                     )
 
-                    score, reasons = calculate_score(funding, vol_ratio, oi_change, ob_ratio, liq_heat, volume)
-
                     if score >= ALERT_MIN_SCORE:
-                        if now - last_alert[symbol] < 2700:  # 45 minutes dedup
+                        if now - last_alert[symbol] < 2700:  # 45 min dedup
                             continue
                         last_alert[symbol] = now
 
@@ -216,9 +274,9 @@ def bot_loop():
 📊 Volume: ${volume / 1e6:.2f}M
 
 📈 Funding: {funding*100:+.4f}%
-📦 OI Change: {oi_change:+.2f}%
-📚 Orderbook: {ob_ratio:.2f}
-⚡ Volume Spike: {vol_ratio:.2f}x
+📦 OI: {oi_change:+.2f}%
+📚 OB: {ob_ratio:.2f}
+⚡ Spike: {vol_ratio:.2f}x
 
 🎯 Score: <b>{score}/100</b>
 
